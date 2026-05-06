@@ -56,8 +56,12 @@ extended to 5 epochs to absorb the higher initial learning rate.
 
 > *Estimates at bf16 autocast with `use_checkpoint: false` on CCPE
 > configs and DINOv2 unfrozen. Numbers can drift ±15% with different
-> mosaic crops. **If you OOM**, set `batch_size: 16` (or 8) — the
-> linear-scaling LR for batch 16 is half: 4e-4 (CCPE) / 8e-4 (FireSight).
+> mosaic crops. CCPE-Single sits at ~65 GB steady-state but peaks
+> >90 GB on busy mosaic batches; `scripts/train_ddp.sh` exports
+> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to prevent
+> fragmentation OOMs at those peaks. **If you still OOM**, set
+> `batch_size: 16` (or 8) — the linear-scaling LR for batch 16 is
+> half: 4e-4 (CCPE) / 8e-4 (FireSight).
 >
 > †FireSight at batch 32 may not fit on H100 NVL (95 GB) because
 > DINOv2 activations are not checkpointed. Recommended fallback for

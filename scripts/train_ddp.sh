@@ -23,6 +23,17 @@ export NCCL_SHM_DISABLE=1
 export NCCL_IB_DISABLE=1
 export OMP_NUM_THREADS=8
 
+# CUDA allocator: expandable_segments avoids fragmentation OOMs that
+# show up when set_to_none=True churns gradient buffers each step.
+# At bs=32 / 1024² we sit at ~65 GB steady-state on H100 NVL (95 GB),
+# but peak forward activations spike to >90 GB on busy mosaic batches.
+# Without this, the allocator fragments and a 768 MiB Linear matmul
+# can fail to find a contiguous block. (Per the OOM error message:
+# "If reserved but unallocated memory is large try setting
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid
+# fragmentation.")
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
 echo "=========================================="
 echo " SAFE-Det Training"
 echo " Config: ${CONFIG}"
