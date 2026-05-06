@@ -1,0 +1,40 @@
+# FireSight-S: DINOv2-Small + SAFE (DCM+FAM+TM) + YOLOX Head
+# Novel architecture for fire/smoke detection
+
+model:
+  type: firesight
+  num_classes: 2
+  backbone_type: dinov2
+  backbone_channels: 256
+  freeze_backbone: false
+  use_dcm: true          # Deformable Contrast Module
+  use_fam: true          # Frequency Attention Module  
+  use_tm: true           # Transparency Modeling
+  use_temporal: false    # Single-frame (no temporal)
+  head_type: yolox
+  input_size: [1022, 1022]  # Must be divisible by 14 (DINOv2 patch size)
+
+data:
+  train_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/images
+  train_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/labels
+  val_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/images
+  val_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/labels
+  batch_size: 2  # DINOv2 + SAFE is memory-heavy
+  num_workers: 8
+  mosaic_prob: 1.0
+  mixup_prob: 0.5
+
+optimizer:
+  lr: 0.0001
+  momentum: 0.9
+  weight_decay: 0.0005
+
+training:
+  max_epochs: 60
+  warmup_epochs: 3
+  val_interval: 5
+  save_interval: 10
+  grad_clip: 35.0
+
+output_dir: runs/firesight_s_1024
+log_interval: 50

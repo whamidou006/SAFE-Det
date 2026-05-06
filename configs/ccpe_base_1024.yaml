@@ -1,0 +1,40 @@
+# CCPE Swin-Base 1024p — Larger backbone variant
+# Swin-Base has 2x wider channels → better accuracy, more compute
+
+model:
+  num_classes: 2
+  in_channels: 3
+  embed_dims: 128  # Swin-Base (vs 96 for Tiny)
+  depths: [2, 2, 18, 2]  # deeper stage 3
+  num_heads: [4, 8, 16, 32]
+  window_size: 7
+  fpn_channels: 192  # wider FPN for larger backbone
+  input_size: [1024, 1024]
+  contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
+  use_checkpoint: true
+  pretrained_swin: null  # set to swin_base_patch4_window7_224.pth
+
+data:
+  train_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/images
+  train_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/labels
+  val_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/images
+  val_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/labels
+  batch_size: 2  # larger model needs smaller batch
+  num_workers: 8
+  mosaic_prob: 1.0
+  mixup_prob: 0.5
+
+optimizer:
+  lr: 0.00005  # lower LR for larger model
+  momentum: 0.9
+  weight_decay: 0.0005
+
+training:
+  max_epochs: 80
+  warmup_epochs: 3
+  val_interval: 5
+  save_interval: 10
+  grad_clip: 35.0
+
+output_dir: runs/ccpe_base_1024
+log_interval: 50

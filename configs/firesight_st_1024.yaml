@@ -1,0 +1,42 @@
+# FireSight-ST: DINOv2-Small + Full SAFE + Temporal Motion Fusion
+# For cameras with sequential frames (60s or 360s intervals)
+
+model:
+  type: firesight
+  num_classes: 2
+  backbone_type: dinov2
+  backbone_channels: 256
+  freeze_backbone: false
+  use_dcm: true
+  use_fam: true
+  use_tm: true
+  use_temporal: true     # Enable temporal motion-guided fusion
+  head_type: yolox
+  input_size: [1022, 1022]
+
+data:
+  train_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/images
+  train_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/labels
+  val_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/images
+  val_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/labels
+  batch_size: 2
+  num_workers: 8
+  mosaic_prob: 0.8  # Lower mosaic for temporal consistency
+  mixup_prob: 0.3
+  multi_frame: true
+  frame_interval: 60
+
+optimizer:
+  lr: 0.00008
+  momentum: 0.9
+  weight_decay: 0.0005
+
+training:
+  max_epochs: 60
+  warmup_epochs: 3
+  val_interval: 5
+  save_interval: 10
+  grad_clip: 35.0
+
+output_dir: runs/firesight_st_1024
+log_interval: 50
