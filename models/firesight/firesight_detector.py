@@ -274,7 +274,7 @@ class FireSightDetector(nn.Module):
 
         self.head_type = head_type
 
-    def forward(self, x, prev_x=None, targets=None):
+    def forward(self, x, prev_x=None, targets=None, return_raw=False):
         """
         Args:
             x:        (B, 3, H, W) current frame
@@ -283,15 +283,22 @@ class FireSightDetector(nn.Module):
                       ``head_type=='dfine'`` and the model is in training
                       mode (the criterion's contrastive denoising group
                       consumes them). YOLOX path ignores this argument.
+            return_raw: if True, always return the raw YOLOX head outputs
+                      (cls_scores, bbox_preds, obj_scores) regardless of
+                      train/eval mode. Needed by validate() which puts the
+                      model in eval() (to disable Dropout/DropPath) but
+                      still wants raw logits for loss computation. Ignored
+                      for D-FINE head (which always returns the raw dict).
 
         Returns:
-            YOLOX head, training:  (cls_scores, bbox_preds, obj_scores)
-            YOLOX head, eval:      decoded predictions tensor
-            D-FINE head:           dict with 'pred_logits', 'pred_boxes',
-                                   plus auxiliary FDR / denoising keys.
-                                   The same dict shape is returned in
-                                   train and eval; postprocessing is
-                                   performed externally by PostProcessor.
+            YOLOX head, training (or return_raw=True):
+                (cls_scores, bbox_preds, obj_scores)
+            YOLOX head, eval (return_raw=False):
+                decoded predictions tensor
+            D-FINE head:
+                dict with 'pred_logits', 'pred_boxes', plus auxiliary
+                FDR / denoising keys. Same shape in train and eval;
+                postprocessing is performed externally by PostProcessor.
         """
         # Backbone
         features = self.backbone(x)
@@ -314,7 +321,7 @@ class FireSightDetector(nn.Module):
             return self.head(fpn_out, targets=targets)
 
         cls_scores, bbox_preds, obj_scores = self.head(fpn_out)
-        if not self.training:
+        if not self.training and not return_raw:
             return self.head.decode_outputs(cls_scores, bbox_preds, obj_scores,
                                             self.input_size)
         return cls_scores, bbox_preds, obj_scores

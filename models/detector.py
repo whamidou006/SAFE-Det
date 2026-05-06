@@ -69,20 +69,27 @@ class CCPE_Detector(nn.Module):
         if pretrained_swin:
             self.backbone.load_pretrained(pretrained_swin)
 
-    def forward(self, x):
+    def forward(self, x, return_raw=False):
         """
         Args:
             x: (B, C, H, W) input images
+            return_raw: if True, always return raw (cls_scores, bbox_preds,
+                obj_scores) regardless of train/eval mode. Needed by the
+                validate() loop, which puts the model in eval() (to disable
+                Dropout/DropPath) but still needs raw logits to compute val
+                loss with the same loss_fn used during training.
 
         Returns:
-            In training mode: cls_scores, bbox_preds, obj_scores (raw)
-            In eval mode: decoded predictions (B, N, 4+num_classes)
+            In training mode (or return_raw=True):
+                cls_scores, bbox_preds, obj_scores  (raw logits per FPN level)
+            In eval mode (return_raw=False):
+                decoded predictions (B, N, 4 + 1 + num_classes)
         """
         features = self.backbone(x)
         fpn_features = self.neck(features)
         cls_scores, bbox_preds, obj_scores = self.head(fpn_features)
 
-        if not self.training:
+        if not self.training and not return_raw:
             return self.head.decode_outputs(
                 cls_scores, bbox_preds, obj_scores, self.input_size
             )

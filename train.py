@@ -396,7 +396,12 @@ def validate(model, dataloader, loss_fn, rank, cfg):
                 outputs = model(imgs, targets=dfine_targets)
                 loss, _ = loss_fn(outputs, targets, img_size)
             else:
-                cls_scores, bbox_preds, obj_scores = model(imgs)
+                # return_raw=True: keep model in eval() to disable
+                # Dropout/DropPath but still get raw logits for val-loss
+                # computation. Without this, eval mode triggers head.decode_outputs()
+                # which collapses outputs into a single decoded tensor and
+                # the unpack below fails with "too many values to unpack".
+                cls_scores, bbox_preds, obj_scores = model(imgs, return_raw=True)
                 loss, _ = loss_fn(cls_scores, bbox_preds, obj_scores,
                                   targets, base.head)
         total_loss += loss.item()
