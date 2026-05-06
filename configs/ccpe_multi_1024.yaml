@@ -30,13 +30,14 @@ data:
   frame_interval: 60  # seconds between frames
 
 optimizer:
-  lr: 8.0e-4
+  # Lowered to 2.0e-4 — see ccpe_single_1024.yaml for rationale.
+  lr: 2.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
 training:
   max_epochs: 50
-  warmup_epochs: 5
+  warmup_epochs: 8  # extended from 5 because Swin is pretrained (random head needs warmup)
   val_interval: 1
   save_interval: 2
   grad_clip: 35.0

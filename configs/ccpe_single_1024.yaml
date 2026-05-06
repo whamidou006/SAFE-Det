@@ -26,13 +26,20 @@ data:
   mixup_prob: 0.5
 
 optimizer:
-  lr: 8.0e-4
+  # Lowered from 8.0e-4 to 2.0e-4 because the Swin backbone is now
+  # ImageNet-pretrained (see model.pretrained_swin). Fine-tuning a
+  # pretrained backbone with the from-scratch linear-scaled LR
+  # (8e-4 at bs=32) drives the random head's gradients to inf on
+  # batch 1, which GradScaler skips silently and the loss freezes.
+  # 2e-4 head + 2e-5 backbone (after the 0.1x get_param_groups
+  # split) is the standard YOLOX-on-pretrained-Swin range.
+  lr: 2.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
 training:
   max_epochs: 50
-  warmup_epochs: 5
+  warmup_epochs: 8  # extended from 5: the pretrained backbone needs more time to let the random head catch up
   val_interval: 1
   save_interval: 2
   grad_clip: 35.0

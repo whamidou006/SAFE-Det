@@ -282,6 +282,7 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
     model.train()
     total_loss = 0
     num_batches = 0
+    skipped_steps = 0
     log_interval = cfg.get('log_interval', 50)
     start_time = time.time()
 
@@ -292,7 +293,7 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
     for batch_idx, (imgs, targets, _) in enumerate(dataloader):
         imgs = imgs.cuda(non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         with autocast(dtype=AMP_DTYPE):
             if head_type == 'dfine':
@@ -323,19 +324,21 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
                     f"Epoch {epoch} batch {batch_idx}: non-finite loss "
                     f"({loss.item()}); skipping step"
                 )
-            optimizer.zero_grad(set_to_none=True)
+            skipped_steps += 1
             continue
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
         # scaler.step() internally checks for inf/NaN gradients and
-        # skips the optimizer.step() call (returning None) when found.
-        # This is the key safety net under bf16: even though bf16
-        # itself doesn't underflow, the assigner's matmul or a
-        # numerically-bad target can still produce inf gradients.
+        # silently skips the optimizer.step() call (returning None)
+        # when found. We detect that skip by reading the scale before
+        # and after update(): if it dropped, the step was skipped.
+        scale_before = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
+        if scaler.get_scale() < scale_before:
+            skipped_steps += 1
 
         total_loss += loss.item()
         num_batches += 1
@@ -347,12 +350,17 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
                 f"loss={loss.item():.4f} cls={loss_dict.get('loss_cls', 0.0):.4f} "
                 f"bbox={loss_dict.get('loss_bbox', 0.0):.4f} "
                 f"obj={loss_dict.get('loss_obj', 0.0):.4f} "
-                f"fg={loss_dict.get('num_fg', 0)} elapsed={elapsed:.1f}s"
+                f"fg={loss_dict.get('num_fg', 0)} "
+                f"scale={scaler.get_scale():.0f} skipped={skipped_steps} "
+                f"elapsed={elapsed:.1f}s"
             )
 
     avg_loss = total_loss / max(num_batches, 1)
     if rank == 0:
-        logger.info(f"Epoch {epoch} complete — avg loss: {avg_loss:.4f}")
+        logger.info(
+            f"Epoch {epoch} complete — avg loss: {avg_loss:.4f}, "
+            f"skipped {skipped_steps}/{len(dataloader)} steps"
+        )
     return avg_loss
 
 

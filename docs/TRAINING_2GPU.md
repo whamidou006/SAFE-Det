@@ -46,8 +46,8 @@ extended to 5 epochs to absorb the higher initial learning rate.
 
 | # | Config                                | per-GPU batch | Global batch (2 GPUs) | Img size | LR (config) | VRAM/GPU* | Epochs |
 |---|---------------------------------------|--------------:|----------------------:|---------:|------------:|----------:|-------:|
-| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 8e-4 (SGD)   | ~70 GB | 50 |
-| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 8e-4 (SGD)   | ~80 GB | 50 |
+| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 2e-4 (SGD)†† | ~70 GB | 50 |
+| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 2e-4 (SGD)†† | ~80 GB | 50 |
 | 3 | `ccpe_base_1024.yaml`                 | 32 | 64 | 1024 | 8e-4 (SGD)   | ~85 GB | 50 |
 | 4 | `firesight_s_1024.yaml`               | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 5 | `firesight_st_1024.yaml`              | 32 | 64 | 1022 | 1.28e-3 (SGD)| OOM† | 50 |
@@ -69,6 +69,15 @@ extended to 5 epochs to absorb the higher initial learning rate.
 > (`save_interval: 2`). The best-loss model is saved as
 > `runs/<config>/best.pth` and overwritten whenever val loss improves
 > (val loss is averaged across DDP ranks for fair selection).
+>
+> ††The two Swin-Tiny CCPE configs use **lr=2e-4** (1/4 of the
+> linear-scaled 8e-4) because the backbone is now ImageNet-pretrained.
+> Fine-tuning a pretrained backbone with the from-scratch LR drives
+> the random head's gradients to inf on the first batch, GradScaler
+> silently skips every step, and the loss freezes at its initial
+> value. `warmup_epochs` is also bumped from 5 → 8 for the same
+> reason. `ccpe_base_1024.yaml` keeps lr=8e-4 because it currently
+> trains Swin-Base from scratch (no pretrained weights downloaded).
 >
 > The cosine LR scheduler uses **per-group `eta_min`** so the backbone
 > floors at `backbone_lr * 0.05` and the head at `head_lr * 0.05`,
