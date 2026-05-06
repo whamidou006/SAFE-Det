@@ -12,9 +12,8 @@ model:
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
   use_checkpoint: false  # disabled: GPU memory headroom available; saves ~30% compute
-  # CCPE patch_embed (6ch) is incompatible and is skipped by load_pretrained,
-  # but every downstream Swin transformer block (~177 keys) loads cleanly.
-  pretrained_swin: checkpoints/swin_tiny_patch4_window7_224.pth
+  # Pretrained Swin DISABLED — same bf16 issue as ccpe_single_1024.yaml.
+  pretrained_swin: null  # checkpoints/swin_tiny_patch4_window7_224.pth
 
 data:
   # For multi-frame, dataset loader concatenates current+previous frame
@@ -30,14 +29,14 @@ data:
   frame_interval: 60  # seconds between frames
 
 optimizer:
-  # Lowered to 2.0e-4 — see ccpe_single_1024.yaml for rationale.
-  lr: 2.0e-4
+  # 8.0e-4 = linear-scaled from-scratch LR. See ccpe_single_1024.yaml.
+  lr: 8.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
 training:
   max_epochs: 50
-  warmup_epochs: 8  # extended from 5 because Swin is pretrained (random head needs warmup)
+  warmup_epochs: 5
   val_interval: 1
   save_interval: 2
   grad_clip: 35.0

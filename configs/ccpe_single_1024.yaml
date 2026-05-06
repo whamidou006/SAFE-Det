@@ -12,7 +12,16 @@ model:
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
   use_checkpoint: false  # disabled: GPU memory headroom available; saves ~30% compute
-  pretrained_swin: checkpoints/swin_tiny_patch4_window7_224.pth
+  # Pretrained Swin temporarily DISABLED while we work out a bf16-safe
+  # loading path. Symptom when enabled: GradScaler scale collapses
+  # (32768 -> ~0 within 50 batches), 96% step-skip rate, loss frozen.
+  # The pretrained attention weights interact poorly with bf16 autocast
+  # (likely QKV matmul or relative_position_bias overflow in low
+  # precision), producing inf gradients almost every batch. To re-enable:
+  # need to cast specific Swin attention ops to fp32 inside
+  # models/swin_ccpe.py. See checkpoints/swin_tiny_patch4_window7_224.pth
+  # which is already downloaded and ready.
+  pretrained_swin: null  # checkpoints/swin_tiny_patch4_window7_224.pth
 
 data:
   # YOLO-format dataset (our April13 dataset)
@@ -26,20 +35,17 @@ data:
   mixup_prob: 0.5
 
 optimizer:
-  # Lowered from 8.0e-4 to 2.0e-4 because the Swin backbone is now
-  # ImageNet-pretrained (see model.pretrained_swin). Fine-tuning a
-  # pretrained backbone with the from-scratch linear-scaled LR
-  # (8e-4 at bs=32) drives the random head's gradients to inf on
-  # batch 1, which GradScaler skips silently and the loss freezes.
-  # 2e-4 head + 2e-5 backbone (after the 0.1x get_param_groups
-  # split) is the standard YOLOX-on-pretrained-Swin range.
-  lr: 2.0e-4
+  # 8.0e-4 = linear-scaled from-scratch LR (Goyal et al. 2017): bs=4
+  # baseline lr=1e-4 -> bs=32 lr=8e-4. (We tried 2e-4 + pretrained
+  # backbone but it triggered inf-gradient skip storms under bf16
+  # autocast — see model.pretrained_swin. Reverted to from-scratch.)
+  lr: 8.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
 training:
   max_epochs: 50
-  warmup_epochs: 8  # extended from 5: the pretrained backbone needs more time to let the random head catch up
+  warmup_epochs: 5
   val_interval: 1
   save_interval: 2
   grad_clip: 35.0
