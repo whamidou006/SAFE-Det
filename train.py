@@ -30,6 +30,16 @@ from models import CCPE_Detector, FireSightDetector
 from utils.dataset import FireSmokeDataset, collate_fn
 from utils.assigner import SimOTAAssigner, build_assigner
 
+# Avoid Bus Error (signal 7) from DataLoader workers when /dev/shm is
+# small (e.g. 16 GB inside a container). The default 'file_descriptor'
+# strategy mmaps tensors through shm; with high num_workers and large
+# images, shm gets exhausted and workers SIGBUS. 'file_system' uses
+# regular files instead — slightly slower per tensor but unbounded.
+try:
+    torch.multiprocessing.set_sharing_strategy('file_system')
+except RuntimeError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -416,17 +426,28 @@ def main():
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
+    # Worker tuning: persistent_workers reuses processes across epochs
+    # (so the dataset index isn't re-loaded every epoch), and a modest
+    # prefetch_factor keeps GPU fed without exhausting RAM/shm.
+    n_workers_train = int(data_cfg.get('num_workers', 8))
+    n_workers_val = max(2, n_workers_train // 2)
     train_loader = DataLoader(
-        train_dataset, batch_size=data_cfg.get('batch_size', 4),
+        train_dataset, batch_size=int(data_cfg.get('batch_size', 4)),
         sampler=train_sampler, shuffle=(train_sampler is None),
-        num_workers=data_cfg.get('num_workers', 8),
-        collate_fn=collate_fn, pin_memory=True, drop_last=True
+        num_workers=n_workers_train,
+        collate_fn=collate_fn, pin_memory=True, drop_last=True,
+        persistent_workers=(n_workers_train > 0),
+        prefetch_factor=int(data_cfg.get('prefetch_factor', 2))
+            if n_workers_train > 0 else None,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=data_cfg.get('batch_size', 4),
+        val_dataset, batch_size=int(data_cfg.get('batch_size', 4)),
         sampler=val_sampler, shuffle=False,
-        num_workers=data_cfg.get('num_workers', 4),
-        collate_fn=collate_fn, pin_memory=True
+        num_workers=n_workers_val,
+        collate_fn=collate_fn, pin_memory=True,
+        persistent_workers=(n_workers_val > 0),
+        prefetch_factor=int(data_cfg.get('prefetch_factor', 2))
+            if n_workers_val > 0 else None,
     )
 
     if is_main:
