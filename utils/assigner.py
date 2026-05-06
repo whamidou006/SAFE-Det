@@ -103,11 +103,11 @@ class SimOTAAssigner:
                                        self.center_radius)
         ious = _pairwise_iou(pred_bboxes, gt_bboxes)
 
-        cls_cost = F.binary_cross_entropy(
-            pred_scores[:, None].expand(-1, num_gt).clamp(1e-6, 1 - 1e-6),
-            torch.ones(num_pred, num_gt, device=pred_scores.device),
-            reduction='none',
-        )
+        # cls_cost = BCE(pred_scores, 1) = -log(pred_scores). We compute it
+        # directly so the assigner is autocast-safe (F.binary_cross_entropy
+        # is rejected under bf16/fp16 autocast). Broadcast handles the GT
+        # axis when it is added to the IoU term below.
+        cls_cost = -pred_scores[:, None].clamp(1e-6, 1 - 1e-6).log()
         cost = cls_cost + self.iou_weight * (1 - ious)
         cost[~is_candidate.any(dim=1)] = 1e6
 
@@ -229,11 +229,10 @@ class DSLAAssigner:
                                        self.center_radius)
         ious = _pairwise_iou(pred_bboxes, gt_bboxes)
 
-        cls_cost = F.binary_cross_entropy(
-            pred_scores[:, None].expand(-1, num_gt).clamp(1e-6, 1 - 1e-6),
-            torch.ones(num_pred, num_gt, device=pred_scores.device),
-            reduction='none',
-        )
+        # cls_cost = BCE(pred_scores, 1) = -log(pred_scores). Direct form
+        # so the assigner is autocast-safe (F.binary_cross_entropy is
+        # rejected under bf16/fp16 autocast). Broadcasts over the GT axis.
+        cls_cost = -pred_scores[:, None].clamp(1e-6, 1 - 1e-6).log()
 
         # Centre distance cost (normalised by GT diagonal length).
         gt_cx = (gt_bboxes[:, 0] + gt_bboxes[:, 2]) / 2
