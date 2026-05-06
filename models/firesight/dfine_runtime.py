@@ -137,15 +137,24 @@ def build_dfine_criterion(num_classes: int = 2,
                           use_focal_loss: bool = True) -> _DFINECriterionWrapper:
     """Construct ``RTv4Criterion`` + ``HungarianMatcher`` lazily.
 
+    Resolution order matches :func:`DFINEHeadAdapter`:
+
+    1. Explicit ``source`` (cfg ``dfine_source``) or
+       ``$CONDOR_EVALUATION_ROOT`` if set,
+    2. otherwise the vendored copy in :mod:`models.firesight.rtv4`.
+
     The defaults reproduce the small-model RT-DETRv4 / D-FINE recipe
     (focal cls + L1 + GIoU, no MAL, no teacher distillation).
     """
     root = _resolve_rtv4_root(source)
-    import sys
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from engine.rtv4.matcher import HungarianMatcher  # type: ignore
-    from engine.rtv4.rtv4_criterion import RTv4Criterion  # type: ignore
+    if root is None:
+        from .rtv4 import HungarianMatcher, RTv4Criterion  # vendored
+    else:
+        import sys
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from engine.rtv4.matcher import HungarianMatcher  # type: ignore
+        from engine.rtv4.rtv4_criterion import RTv4Criterion  # type: ignore
 
     matcher_weights = {'cost_class': 2.0, 'cost_bbox': 5.0, 'cost_giou': 2.0}
     matcher = HungarianMatcher(weight_dict=matcher_weights,
@@ -214,12 +223,17 @@ def build_dfine_postprocessor(num_classes: int = 2,
 
     ``orig_target_sizes`` is a ``(B, 2)`` tensor of ``(H, W)`` pixels.
     Each entry of ``results`` is ``{'labels', 'boxes', 'scores'}``.
+
+    Resolution order matches :func:`build_dfine_criterion`.
     """
     root = _resolve_rtv4_root(source)
-    import sys
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from engine.rtv4.postprocessor import PostProcessor  # type: ignore
+    if root is None:
+        from .rtv4 import PostProcessor  # vendored
+    else:
+        import sys
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from engine.rtv4.postprocessor import PostProcessor  # type: ignore
     return PostProcessor(num_classes=num_classes,
                          use_focal_loss=use_focal_loss,
                          num_top_queries=num_top_queries)

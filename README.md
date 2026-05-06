@@ -36,11 +36,13 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-> **D-FINE head only.** The `head_type: dfine` option imports the user's
-> `engine.rtv4` package from a local Condor-evaluation checkout. Default
-> search path is `/home/whamidouche/ssdprivate/Condor-evaluation`. Override
-> with `cfg.model.dfine_source: /alt/path` or `export
-> CONDOR_EVALUATION_ROOT=/alt/path`.
+> **D-FINE head.** The implementation lives in
+> `models/firesight/rtv4/` (vendored from Condor-evaluation;
+> see `__init__.py` for license/provenance). No external checkout is
+> required. To validate against an upstream revision you can still
+> override the source with `cfg.model.dfine_source: /alt/path` or
+> `export CONDOR_EVALUATION_ROOT=/alt/path` — the override is only
+> consulted when explicitly set.
 
 ---
 
@@ -125,17 +127,11 @@ Tunable in the config's `loss:` block:
 
 ### 5.4 FireSight — D-FINE decoder head
 
-This path uses the rtv4 `DFINETransformer` decoder with the Hungarian-matched
-DETR criterion (`RTv4Criterion`) and the rtv4 `PostProcessor` for evaluation.
-Both training and eval loops dispatch automatically on `head_type: dfine`.
-
-Pre-flight (only once):
-
-```bash
-# Make sure Condor-evaluation is reachable from SAFE-Det
-export CONDOR_EVALUATION_ROOT=/home/whamidouche/ssdprivate/Condor-evaluation
-ls $CONDOR_EVALUATION_ROOT/engine/rtv4/dfine_decoder.py    # must exist
-```
+This path uses the vendored rtv4 `DFINETransformer` decoder
+(`models/firesight/rtv4/`) with the Hungarian-matched DETR criterion
+(`RTv4Criterion`) and the rtv4 `PostProcessor` for evaluation. Both
+training and eval loops dispatch automatically on `head_type: dfine`.
+**No external checkout is required.**
 
 Train:
 
@@ -152,7 +148,9 @@ Customise via the config:
 ```yaml
 model:
   head_type: dfine
-  dfine_source: /alt/Condor-evaluation       # optional override
+  # Optional — only set to validate against an upstream Condor-evaluation
+  # revision. Leave unset to use the vendored copy.
+  # dfine_source: /alt/Condor-evaluation
   dfine_kwargs: { num_queries: 300, num_decoder_layers: 6 }
 loss:
   dfine_weight_dict: { loss_focal: 1.0, loss_bbox: 5.0, loss_giou: 2.0 }
@@ -214,8 +212,14 @@ SAFE-Det/
 │       ├── frequency_attention.py
 │       ├── transparency.py
 │       ├── temporal_fusion.py
-│       ├── dfine_head.py     # DFINEHeadAdapter (lazy rtv4 import)
-│       └── dfine_runtime.py  # Hungarian criterion + PostProcessor wrappers
+│       ├── dfine_head.py     # DFINEHeadAdapter (uses vendored rtv4)
+│       ├── dfine_runtime.py  # Hungarian criterion + PostProcessor wrappers
+│       └── rtv4/             # Vendored D-FINE decoder + criterion + matcher
+│           ├── dfine_decoder.py
+│           ├── rtv4_criterion.py
+│           ├── matcher.py
+│           ├── postprocessor.py
+│           └── ...            # box_ops, denoising, dfine_utils, utils
 ├── utils/
 │   ├── dataset.py            # YOLO-format dataset + augmentation
 │   └── assigner.py           # SimOTA + TAL + DSLA + build_assigner()
@@ -231,9 +235,8 @@ SAFE-Det/
 1. Activate the conda env: `conda activate .../condor-bench`
 2. `cd /home/whamidouche/ssdprivate/SAFE-Det`
 3. `pytest -q` — must show **67 passed**
-4. (D-FINE only) `ls $CONDOR_EVALUATION_ROOT/engine/rtv4/dfine_decoder.py`
-5. Pick a config from §4 and launch with the matching command from §5
-6. Outputs land in `runs/<config-name>/`
+4. Pick a config from §4 and launch with the matching command from §5
+5. Outputs land in `runs/<config-name>/`
 
 ---
 
