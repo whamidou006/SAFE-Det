@@ -329,7 +329,11 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+        # grad_clip from config (default 10.0 — tighter than the YOLOX default
+        # of 35.0 because under bf16 a few inf gradients can quickly poison
+        # the model state through accumulated optimizer momentum).
+        grad_clip = float(cfg.get('training', {}).get('grad_clip', 10.0))
+        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         # scaler.step() internally checks for inf/NaN gradients and
         # silently skips the optimizer.step() call (returning None)
         # when found. We detect that skip by reading the scale before
@@ -345,12 +349,14 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
 
         if rank == 0 and (batch_idx % log_interval == 0):
             elapsed = time.time() - start_time
+            gnorm_val = gnorm.item() if torch.is_tensor(gnorm) else float(gnorm)
             logger.info(
                 f"Epoch {epoch} [{batch_idx}/{len(dataloader)}] "
                 f"loss={loss.item():.4f} cls={loss_dict.get('loss_cls', 0.0):.4f} "
                 f"bbox={loss_dict.get('loss_bbox', 0.0):.4f} "
                 f"obj={loss_dict.get('loss_obj', 0.0):.4f} "
                 f"fg={loss_dict.get('num_fg', 0)} "
+                f"gnorm={gnorm_val:.2f} "
                 f"scale={scaler.get_scale():.0f} skipped={skipped_steps} "
                 f"elapsed={elapsed:.1f}s"
             )

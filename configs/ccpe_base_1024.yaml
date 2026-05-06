@@ -11,7 +11,12 @@ model:
   fpn_channels: 192  # wider FPN for larger backbone
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: true  # re-enabled: see ccpe_single_1024.yaml (Swin-Base needs even more memory)
+  # Swin-Base is ~3x params of Swin-Tiny. Even at bs=16 without checkpoint
+  # this OOMs at 1024². Keep checkpoint=true here, but use bs=8 to reduce
+  # the rate of bf16-checkpoint inf-gradient batches. If NaN cascade
+  # recurs, drop bs to 4 or fix the bf16-safe Swin attention path
+  # (models/swin_ccpe.py).
+  use_checkpoint: true
   # Swin-Base needs different weights. Download and set:
   #   curl -L -o checkpoints/swin_base_patch4_window7_224.pth \
   #     https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window7_224.pth
@@ -22,13 +27,13 @@ data:
   train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
   val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
   val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
-  batch_size: 32  # larger model needs smaller batch
+  batch_size: 8  # Swin-Base + 1024² + bf16; smaller bs reduces inf-gradient frequency under checkpoint
   num_workers: 8
   mosaic_prob: 1.0
   mixup_prob: 0.5
 
 optimizer:
-  lr: 8.0e-4  # lower LR for larger model
+  lr: 2.0e-4  # bs=8 per-GPU x 2 GPUs = global 16; linear-scaled from baseline (bs=4 lr=1e-4 -> bs=16 lr=4e-4, halved again for larger model -> 2e-4)
   momentum: 0.9
   weight_decay: 0.0005
 
@@ -37,7 +42,7 @@ training:
   warmup_epochs: 5
   val_interval: 1
   save_interval: 2
-  grad_clip: 35.0
+  grad_clip: 10.0  # tighter than YOLOX default (35) for bf16 stability
 
 output_dir: runs/ccpe_base_1024
 log_interval: 50

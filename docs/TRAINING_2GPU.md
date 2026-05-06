@@ -46,30 +46,35 @@ extended to 5 epochs to absorb the higher initial learning rate.
 
 | # | Config                                | per-GPU batch | Global batch (2 GPUs) | Img size | LR (config) | VRAM/GPU* | Epochs |
 |---|---------------------------------------|--------------:|----------------------:|---------:|------------:|----------:|-------:|
-| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~30 GB | 50 |
-| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~40 GB | 50 |
-| 3 | `ccpe_base_1024.yaml`                 | 32 | 64 | 1024 | 8e-4 (SGD)   | ~50 GB | 50 |
+| 1 | `ccpe_single_1024.yaml`               | 16 | 32 | 1024 | 4e-4 (SGD)†† | ~50 GB | 50 |
+| 2 | `ccpe_multi_1024.yaml`                | 16 | 32 | 1024 | 4e-4 (SGD)†† | ~60 GB | 50 |
+| 3 | `ccpe_base_1024.yaml`                 |  8 | 16 | 1024 | 2e-4 (SGD)   | ~60 GB | 50 |
 | 4 | `firesight_s_1024.yaml`               | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 5 | `firesight_st_1024.yaml`              | 32 | 64 | 1022 | 1.28e-3 (SGD)| OOM† | 50 |
 | 6 | `firesight_s_nwd_tal_1024.yaml`       | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 7 | `firesight_dfine_1024.yaml`           | 32 | 64 | 1022 | 1.6e-3 (AdamW)| OOM† | 50 |
 
-> *Estimates at bf16 autocast with `use_checkpoint: true` on CCPE
-> configs (re-enabled — see below) and DINOv2 unfrozen. Numbers can
-> drift ±15% with different mosaic crops. `scripts/train_ddp.sh`
-> exports `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to
-> further reduce fragmentation. **If you still OOM**, set
-> `batch_size: 16` (or 8) — the linear-scaling LR for batch 16 is
-> half: 4e-4 (CCPE) / 8e-4 (FireSight).
+> *Estimates at bf16 autocast with `use_checkpoint: false` on Swin-Tiny
+> CCPE configs and `use_checkpoint: true` on Swin-Base only. DINOv2 is
+> unfrozen on FireSight. Numbers can drift ±15% with different mosaic
+> crops. `scripts/train_ddp.sh` exports
+> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to further reduce
+> fragmentation.
 >
-> **Note on `use_checkpoint`:** initially set to `false` on CCPE
-> configs to save ~30% compute, but bs=32 / 1024² activations peak
-> > 90 GB on busy mosaic batches and the run OOMed after a few
-> epochs even with `expandable_segments:True`. Gradient checkpointing
-> recomputes Swin activations during backward — the peak drops ~3×
-> (to ~30 GB on `ccpe_single`), trading ~30% wall-clock speed for the
-> headroom needed to actually finish training. If you have a 140 GB+
-> H200 you can flip it back to `false`.
+> **Why bs=16 (not 32) on CCPE Tiny?** We tried both batch sizes and ran
+> into a wall in both directions:
+>  - `bs=32, use_checkpoint=false` → OOM at 92 GB peak after a few
+>    epochs (busy mosaic batches push activations past 90 GB).
+>  - `bs=32, use_checkpoint=true` → memory fine, but the bf16+checkpoint
+>    recompute path produces inf gradients on ~50% of batches; the
+>    GradScaler scale collapses 65536→0 within ~100 batches and the
+>    model NaNs out by batch ~200.
+>  - `bs=16, use_checkpoint=false` → ~50 GB steady, no OOM, no NaN
+>    cascade. Throughput is ~50% of the ideal bs=32 case but it actually
+>    finishes training. **This is the recommended config until someone
+>    implements a bf16-safe Swin attention path** (cast QKV matmul +
+>    softmax + relative_position_bias to fp32 inside
+>    `models/swin_ccpe.py`).
 >
 > †FireSight at batch 32 may not fit on H100 NVL (95 GB) because
 > DINOv2 activations are not checkpointed. Recommended fallback for
@@ -106,6 +111,14 @@ extended to 5 epochs to absorb the higher initial learning rate.
 > permanently NaNs the model. The actual loss-scaling part is a no-op
 > for bf16 (scale stays ~1.0). A defensive non-finite-loss check also
 > short-circuits the step before backward in the same code path.
+>
+> **Per-batch log line includes `gnorm=`, `scale=` and `skipped=`** so you
+> can spot inf-gradient cascades in real time. Healthy training looks
+> like `gnorm=2-8`, `scale=65536`, `skipped=0`. Trouble looks like
+> `scale<<65536` or rapidly growing `skipped=` counter — that means
+> bf16 numerics are unstable. `grad_clip` is configurable
+> (`training.grad_clip` in YAML) and defaults to 10.0 (tighter than the
+> YOLOX default of 35.0 to be safer under bf16).
 
 ---
 
@@ -203,8 +216,10 @@ freeze_backbone: false
 backbone_kwargs: { use_checkpoint: true }   # if your backbone supports it
 ```
 
-For CCPE configs `use_checkpoint: true` is already set in
-`ccpe_single_1024.yaml` and inherited by the others.
+For CCPE configs `use_checkpoint: false` is set in `ccpe_single_1024.yaml`
+and `ccpe_multi_1024.yaml` (Swin-Tiny — bs=16 is small enough that
+checkpoint isn't needed). `ccpe_base_1024.yaml` keeps
+`use_checkpoint: true` because Swin-Base is ~3× larger.
 
 ---
 

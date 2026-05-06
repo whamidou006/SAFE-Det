@@ -11,7 +11,7 @@ model:
   fpn_channels: 128
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: true  # re-enabled: see ccpe_single_1024.yaml (bs=32 OOM without it)
+  use_checkpoint: false  # see ccpe_single_1024.yaml — bs=16 + no checkpoint avoids OOM AND bf16 NaN cascade
   # Pretrained Swin DISABLED — same bf16 issue as ccpe_single_1024.yaml.
   pretrained_swin: null  # checkpoints/swin_tiny_patch4_window7_224.pth
 
@@ -21,7 +21,7 @@ data:
   train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
   val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
   val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
-  batch_size: 32
+  batch_size: 16
   num_workers: 8
   mosaic_prob: 1.0
   mixup_prob: 0.3
@@ -29,8 +29,8 @@ data:
   frame_interval: 60  # seconds between frames
 
 optimizer:
-  # 8.0e-4 = linear-scaled from-scratch LR. See ccpe_single_1024.yaml.
-  lr: 8.0e-4
+  # bs=16 per-GPU x 2 GPUs = global batch 32. See ccpe_single_1024.yaml.
+  lr: 4.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
@@ -39,7 +39,7 @@ training:
   warmup_epochs: 5
   val_interval: 1
   save_interval: 2
-  grad_clip: 35.0
+  grad_clip: 10.0  # tighter than YOLOX default (35) for bf16 stability
 
 output_dir: runs/ccpe_multi_1024
 log_interval: 50

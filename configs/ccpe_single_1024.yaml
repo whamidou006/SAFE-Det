@@ -11,16 +11,16 @@ model:
   fpn_channels: 128
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: true  # re-enabled: bs=32 / 1024² peaks > 90 GB without it (OOM after a few epochs); cuts peak memory ~3x at ~30% compute cost
-  # Pretrained Swin temporarily DISABLED while we work out a bf16-safe
-  # loading path. Symptom when enabled: GradScaler scale collapses
-  # (32768 -> ~0 within 50 batches), 96% step-skip rate, loss frozen.
-  # The pretrained attention weights interact poorly with bf16 autocast
-  # (likely QKV matmul or relative_position_bias overflow in low
-  # precision), producing inf gradients almost every batch. To re-enable:
-  # need to cast specific Swin attention ops to fp32 inside
-  # models/swin_ccpe.py. See checkpoints/swin_tiny_patch4_window7_224.pth
-  # which is already downloaded and ready.
+  # Gradient checkpointing DISABLED: when enabled with bf16 autocast, the
+  # recomputed-forward path produces inf gradients on a high fraction of
+  # batches (scaler.scale collapses 65536 -> 0 within ~100 batches, ~50%
+  # step-skip rate, eventual NaN model state by batch ~200). Avoiding
+  # checkpoint by using a smaller batch size instead (bs=16) keeps memory
+  # under control AND keeps numerics healthy.
+  use_checkpoint: false
+  # Pretrained Swin DISABLED: same bf16 instability — pretrained attention
+  # magnitudes overflow under autocast (96% step-skip rate observed).
+  # To re-enable: cast Swin attention ops to fp32 in models/swin_ccpe.py.
   pretrained_swin: null  # checkpoints/swin_tiny_patch4_window7_224.pth
 
 data:
@@ -29,17 +29,18 @@ data:
   train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
   val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
   val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
-  batch_size: 32
+  batch_size: 16
   num_workers: 8
   mosaic_prob: 1.0
   mixup_prob: 0.5
 
 optimizer:
-  # 8.0e-4 = linear-scaled from-scratch LR (Goyal et al. 2017): bs=4
-  # baseline lr=1e-4 -> bs=32 lr=8e-4. (We tried 2e-4 + pretrained
-  # backbone but it triggered inf-gradient skip storms under bf16
-  # autocast — see model.pretrained_swin. Reverted to from-scratch.)
-  lr: 8.0e-4
+  # bs=16 per-GPU * 2 GPUs = global batch 32. Linear-scaling from baseline
+  # bs=4 lr=1e-4 -> 4.0e-4. (Originally tried bs=32 + lr=8e-4, but bs=32
+  # without checkpoint OOMs at 92 GB peak, and bs=32 with checkpoint
+  # triggers bf16 NaN cascade by batch ~200. bs=16 + no checkpoint is the
+  # stable middle ground.)
+  lr: 4.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
@@ -48,7 +49,7 @@ training:
   warmup_epochs: 5
   val_interval: 1
   save_interval: 2
-  grad_clip: 35.0
+  grad_clip: 10.0  # tighter than YOLOX default (35) for bf16 stability
 
 output_dir: runs/ccpe_single_1024
 log_interval: 50
