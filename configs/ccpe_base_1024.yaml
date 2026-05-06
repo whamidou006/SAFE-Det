@@ -30,10 +30,10 @@ optimizer:
   weight_decay: 0.0005
 
 training:
-  max_epochs: 80
+  max_epochs: 50
   warmup_epochs: 3
-  val_interval: 5
-  save_interval: 10
+  val_interval: 1
+  save_interval: 2
   grad_clip: 35.0
 
 output_dir: runs/ccpe_base_1024

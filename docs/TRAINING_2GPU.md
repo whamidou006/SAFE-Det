@@ -22,19 +22,24 @@ already in the config; with 2 GPUs you may want to scale it linearly
 
 | # | Config                                | per-GPU batch | Global batch (2 GPUs) | Img size | LR (config) | VRAM/GPU* | Epochs |
 |---|---------------------------------------|--------------:|----------------------:|---------:|------------:|----------:|-------:|
-| 1 | `ccpe_single_1024.yaml`               | 4 | 8 | 1024 | 1e-4 (SGD)  | ~22 GB | 80 |
-| 2 | `ccpe_multi_1024.yaml`                | 4 | 8 | 1024 | 1e-4 (SGD)  | ~26 GB | 80 |
-| 3 | `ccpe_base_1024.yaml`                 | 2 | 4 | 1024 | 1e-4 (SGD)  | ~36 GB | 80 |
-| 4 | `firesight_s_1024.yaml`               | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 60 |
-| 5 | `firesight_st_1024.yaml`              | 2 | 4 | 1022 | 8e-5 (SGD)  | ~38 GB | 60 |
-| 6 | `firesight_s_nwd_tal_1024.yaml`       | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 60 |
-| 7 | `firesight_dfine_1024.yaml`           | 2 | 4 | 1022 | 1e-4 (AdamW)| ~46 GB | 60 |
+| 1 | `ccpe_single_1024.yaml`               | 4 | 8 | 1024 | 1e-4 (SGD)  | ~22 GB | 50 |
+| 2 | `ccpe_multi_1024.yaml`                | 4 | 8 | 1024 | 1e-4 (SGD)  | ~26 GB | 50 |
+| 3 | `ccpe_base_1024.yaml`                 | 2 | 4 | 1024 | 1e-4 (SGD)  | ~36 GB | 50 |
+| 4 | `firesight_s_1024.yaml`               | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 50 |
+| 5 | `firesight_st_1024.yaml`              | 2 | 4 | 1022 | 8e-5 (SGD)  | ~38 GB | 50 |
+| 6 | `firesight_s_nwd_tal_1024.yaml`       | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 50 |
+| 7 | `firesight_dfine_1024.yaml`           | 2 | 4 | 1022 | 1e-4 (AdamW)| ~46 GB | 50 |
 
 > *Rough VRAM at bf16 autocast with `use_checkpoint: true` on
 > CCPE configs and DINOv2 unfrozen. Numbers can drift ±15% with
 > different mosaic crops. If you OOM, halve the per-GPU batch, set
 > `mosaic_prob: 0.5`, or enable `freeze_backbone: true` for the
 > first epochs (FireSight only).
+>
+> All configs train for **50 epochs**, validate **every epoch**
+> (`val_interval: 1`) and snapshot **every 2 epochs**
+> (`save_interval: 2`). The best-loss model is saved as
+> `runs/<config>/best.pth` and overwritten whenever val loss improves.
 
 ---
 
