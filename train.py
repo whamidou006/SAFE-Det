@@ -86,6 +86,14 @@ def parse_args():
     parser.add_argument('--gpu', type=int, default=None, help='Single GPU id (for non-DDP)')
     parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
     parser.add_argument('--eval-only', action='store_true', help='Evaluation only')
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help='Override per-GPU batch size from the YAML '
+                             '(useful for OOM fallbacks without editing config).')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Override base learning rate from the YAML '
+                             '(typically combined with --batch-size).')
+    parser.add_argument('--max-epochs', type=int, default=None,
+                        help='Override training.max_epochs from the YAML.')
     return parser.parse_args()
 
 
@@ -351,6 +359,16 @@ def validate(model, dataloader, loss_fn, rank, cfg):
 def main():
     args = parse_args()
     cfg = load_config(args.config)
+
+    # CLI overrides — applied before anything reads the config so the
+    # whole pipeline (dataset, optimizer, scheduler, log lines) sees
+    # the new values consistently.
+    if args.batch_size is not None:
+        cfg.setdefault('data', {})['batch_size'] = args.batch_size
+    if args.lr is not None:
+        cfg.setdefault('optimizer', {})['lr'] = args.lr
+    if args.max_epochs is not None:
+        cfg.setdefault('training', {})['max_epochs'] = args.max_epochs
 
     rank, local_rank, world_size = setup_distributed()
     is_main = (rank == 0)

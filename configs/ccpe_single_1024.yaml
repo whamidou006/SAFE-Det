@@ -20,19 +20,19 @@ data:
   train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
   val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
   val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
-  batch_size: 4
-  num_workers: 8
+  batch_size: 32
+  num_workers: 16
   mosaic_prob: 1.0
   mixup_prob: 0.5
 
 optimizer:
-  lr: 0.0001
+  lr: 8e-4
   momentum: 0.9
   weight_decay: 0.0005
 
 training:
   max_epochs: 50
-  warmup_epochs: 2
+  warmup_epochs: 5
   val_interval: 1
   save_interval: 2
   grad_clip: 35.0

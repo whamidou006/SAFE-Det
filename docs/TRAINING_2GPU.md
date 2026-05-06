@@ -13,33 +13,38 @@ Replace `0,1` below with whichever two GPU IDs you want to use
 
 ---
 
-## 1. Per-config recipe (sized for 2× A100 80 GB)
+## 1. Per-config recipe (sized for 2× H100 NVL 95 GB)
 
 `batch_size` in the table is **per-GPU** (what the YAML carries).
-**Global batch** = `per-GPU batch × 2 GPUs`. The LR column is what's
-already in the config; with 2 GPUs you may want to scale it linearly
-(see §3) — divide by 2 if you previously trained on 4 GPUs.
+**Global batch** = `per-GPU batch × 2 GPUs`. LR has already been
+linear-scaled (Goyal et al. 2017) for the new batch and warmup is
+extended to 5 epochs to absorb the higher initial learning rate.
 
 | # | Config                                | per-GPU batch | Global batch (2 GPUs) | Img size | LR (config) | VRAM/GPU* | Epochs |
 |---|---------------------------------------|--------------:|----------------------:|---------:|------------:|----------:|-------:|
-| 1 | `ccpe_single_1024.yaml`               | 4 | 8 | 1024 | 1e-4 (SGD)  | ~22 GB | 50 |
-| 2 | `ccpe_multi_1024.yaml`                | 4 | 8 | 1024 | 1e-4 (SGD)  | ~26 GB | 50 |
-| 3 | `ccpe_base_1024.yaml`                 | 2 | 4 | 1024 | 1e-4 (SGD)  | ~36 GB | 50 |
-| 4 | `firesight_s_1024.yaml`               | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 50 |
-| 5 | `firesight_st_1024.yaml`              | 2 | 4 | 1022 | 8e-5 (SGD)  | ~38 GB | 50 |
-| 6 | `firesight_s_nwd_tal_1024.yaml`       | 2 | 4 | 1022 | 1e-4 (SGD)  | ~30 GB | 50 |
-| 7 | `firesight_dfine_1024.yaml`           | 2 | 4 | 1022 | 1e-4 (AdamW)| ~46 GB | 50 |
+| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 8e-4 (SGD)   | ~70 GB | 50 |
+| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 8e-4 (SGD)   | ~80 GB | 50 |
+| 3 | `ccpe_base_1024.yaml`                 | 32 | 64 | 1024 | 8e-4 (SGD)   | ~85 GB | 50 |
+| 4 | `firesight_s_1024.yaml`               | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
+| 5 | `firesight_st_1024.yaml`              | 32 | 64 | 1022 | 1.28e-3 (SGD)| OOM† | 50 |
+| 6 | `firesight_s_nwd_tal_1024.yaml`       | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
+| 7 | `firesight_dfine_1024.yaml`           | 32 | 64 | 1022 | 1.6e-3 (AdamW)| OOM† | 50 |
 
-> *Rough VRAM at bf16 autocast with `use_checkpoint: true` on
-> CCPE configs and DINOv2 unfrozen. Numbers can drift ±15% with
-> different mosaic crops. If you OOM, halve the per-GPU batch, set
-> `mosaic_prob: 0.5`, or enable `freeze_backbone: true` for the
-> first epochs (FireSight only).
+> *Estimates at bf16 autocast with `use_checkpoint: true` on CCPE
+> configs and DINOv2 unfrozen. Numbers can drift ±15% with different
+> mosaic crops. **If you OOM**, set `batch_size: 16` (or 8) — the
+> linear-scaling LR for batch 16 is half: 4e-4 (CCPE) / 8e-4 (FireSight).
+>
+> †FireSight at batch 32 may not fit on H100 NVL (95 GB) because
+> DINOv2 activations are not checkpointed. Recommended fallback for
+> FireSight is `batch_size: 16, lr: 8e-4` (or `lr: 6.4e-4` for `_st`,
+> `lr: 8e-4` for D-FINE / AdamW).
 >
 > All configs train for **50 epochs**, validate **every epoch**
 > (`val_interval: 1`) and snapshot **every 2 epochs**
 > (`save_interval: 2`). The best-loss model is saved as
 > `runs/<config>/best.pth` and overwritten whenever val loss improves.
+> `num_workers` is set to 16 to keep the bigger batches fed.
 
 ---
 
@@ -67,6 +72,23 @@ bash scripts/train_ddp.sh configs/firesight_s_nwd_tal_1024.yaml  0,1
 # 7. FireSight + D-FINE decoder head (vendored rtv4 — no extra checkout)
 bash scripts/train_ddp.sh configs/firesight_dfine_1024.yaml      0,1
 ```
+
+### 2.1. Override batch / LR / epochs without editing the YAML
+
+`train_ddp.sh` forwards any extra args after `<gpus>` straight to
+`train.py`. The most common knobs are:
+
+```bash
+# Halve the batch (and LR) if you OOM at 32:
+bash scripts/train_ddp.sh configs/firesight_s_1024.yaml 0,1 \
+     --batch-size 16 --lr 8e-4
+
+# Quick smoke run (1 epoch):
+bash scripts/train_ddp.sh configs/ccpe_single_1024.yaml 0,1 --max-epochs 1
+```
+
+The CLI flags override the YAML *before* dataset/optimizer/scheduler
+construction so every component sees consistent values.
 
 Each run writes to `runs/<config-stem>/{best.pth, epoch_*.pth, final.pth}`.
 
