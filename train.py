@@ -435,9 +435,13 @@ def main():
 
     # Optimizer
     opt_cfg = cfg.get('optimizer', {})
-    lr = opt_cfg.get('lr', 0.0001)
+    # PyYAML's strict YAML 1.1 spec parses bare scientific notation like
+    # "8e-4" as a STRING (it requires either a decimal point or a padded
+    # exponent like 8e-04 to recognise a float). Coerce defensively so a
+    # YAML typo can't blow up arithmetic in detector.get_param_groups.
+    lr = float(opt_cfg.get('lr', 0.0001))
     base_lrs = []
-    weight_decay = opt_cfg.get('weight_decay', 5e-4)
+    weight_decay = float(opt_cfg.get('weight_decay', 5e-4))
 
     # FireSightDetector does not have get_param_groups; build one default group.
     base = model.module if hasattr(model, 'module') else model

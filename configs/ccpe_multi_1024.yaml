@@ -28,7 +28,7 @@ data:
   frame_interval: 60  # seconds between frames
 
 optimizer:
-  lr: 8e-4
+  lr: 8.0e-4
   momentum: 0.9
   weight_decay: 0.0005
 
