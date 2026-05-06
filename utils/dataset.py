@@ -3,14 +3,22 @@ COCO-format dataset for fire/smoke detection with YOLOX augmentations.
 Supports both single-frame and multi-frame (temporal) modes.
 """
 
+import logging
 import os
 import json
 import random
+import time
 import numpy as np
 import cv2
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Bump when the on-disk cache schema changes so old caches are invalidated.
+_INDEX_CACHE_VERSION = 1
 
 
 class FireSmokeDataset(Dataset):
@@ -61,52 +69,192 @@ class FireSmokeDataset(Dataset):
             self.annotations[img_id].append(ann)
 
     def _load_yolo(self, img_dir, label_dir):
-        """Load YOLO-format labels."""
+        """Load YOLO-format labels.
+
+        Fast path: image dimensions are read via PIL header parsing
+        (~100x faster than cv2.imread, which fully decodes the JPEG)
+        and the per-image header reads are parallelised across threads
+        because the workload is I/O bound. Results are cached as JSON
+        next to the dataset so subsequent runs skip the scan entirely.
+        """
         img_files = sorted([
             f for f in os.listdir(img_dir)
             if f.lower().endswith(('.jpg', '.jpeg', '.png'))
         ])
+        label_files_count = sum(
+            1 for f in os.listdir(label_dir) if f.endswith('.txt')
+        ) if os.path.isdir(label_dir) else 0
+
+        cache_path = self._index_cache_path(img_dir)
+        cached = self._load_index_cache(
+            cache_path, img_dir, label_dir, len(img_files), label_files_count,
+        )
+        if cached is not None:
+            self.images, self.img_ids, self.annotations = cached
+            logger.info(
+                "Loaded dataset index from cache: %d images (%s)",
+                len(self.img_ids), cache_path,
+            )
+            return
+
         self.images = {}
         self.img_ids = []
         self.annotations = {}
 
-        for idx, img_file in enumerate(img_files):
-            img_path = os.path.join(img_dir, img_file)
-            # Read image dimensions
-            img = cv2.imread(img_path)
-            if img is None:
-                continue
-            h, w = img.shape[:2]
+        n = len(img_files)
+        # I/O bound: a generous thread pool helps a lot, but cap at 32 to
+        # avoid kernel queue thrash on slow disks.
+        n_workers = min(32, max(4, (os.cpu_count() or 8) * 2))
+        logger.info(
+            "Scanning %d images in %s with %d threads (cache miss; one-time)...",
+            n, img_dir, n_workers,
+        )
+        t0 = time.time()
 
-            self.images[idx] = {
-                'id': idx,
-                'file_name': img_path,
-                'width': w,
-                'height': h
-            }
-            self.img_ids.append(idx)
+        from concurrent.futures import ThreadPoolExecutor
 
-            # Read YOLO label
-            label_file = os.path.join(label_dir, Path(img_file).stem + '.txt')
-            anns = []
-            if os.path.exists(label_file):
-                with open(label_file) as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if len(parts) >= 5:
-                            cls_id = int(parts[0])
-                            cx, cy, bw, bh = map(float, parts[1:5])
-                            # Convert YOLO normalized to COCO absolute
-                            x1 = (cx - bw / 2) * w
-                            y1 = (cy - bh / 2) * h
-                            box_w = bw * w
-                            box_h = bh * h
-                            anns.append({
-                                'bbox': [x1, y1, box_w, box_h],
-                                'category_id': cls_id,
-                                'area': box_w * box_h
-                            })
-            self.annotations[idx] = anns
+        def _read_dim(args):
+            i, fname = args
+            path = os.path.join(img_dir, fname)
+            try:
+                with Image.open(path) as im:
+                    w, h = im.size
+                return i, fname, path, int(w), int(h), None
+            except Exception as exc:
+                return i, fname, path, 0, 0, repr(exc)
+
+        log_every = max(20000, n // 10) if n else 1
+        skipped = 0
+
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            for done, result in enumerate(
+                ex.map(_read_dim, enumerate(img_files), chunksize=256), 1,
+            ):
+                i, fname, path, w, h, err = result
+                if err is not None:
+                    skipped += 1
+                    if skipped <= 5:
+                        logger.warning("Skipping unreadable image %s: %s", path, err)
+                    continue
+
+                self.images[i] = {
+                    'id': i,
+                    'file_name': path,
+                    'width': w,
+                    'height': h,
+                }
+                self.img_ids.append(i)
+
+                label_file = os.path.join(label_dir, Path(fname).stem + '.txt')
+                anns = []
+                if os.path.exists(label_file):
+                    with open(label_file) as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if len(parts) >= 5:
+                                cls_id = int(parts[0])
+                                cx, cy, bw, bh = map(float, parts[1:5])
+                                x1 = (cx - bw / 2) * w
+                                y1 = (cy - bh / 2) * h
+                                box_w = bw * w
+                                box_h = bh * h
+                                anns.append({
+                                    'bbox': [x1, y1, box_w, box_h],
+                                    'category_id': cls_id,
+                                    'area': box_w * box_h,
+                                })
+                self.annotations[i] = anns
+
+                if done % log_every == 0:
+                    elapsed = time.time() - t0
+                    rate = done / max(elapsed, 1e-6)
+                    logger.info(
+                        "  ...scanned %d/%d images (%.0f img/s, %.1fs)",
+                        done, n, rate, elapsed,
+                    )
+
+        # Order matters for reproducibility: img_ids should be ascending.
+        self.img_ids.sort()
+
+        elapsed = time.time() - t0
+        logger.info(
+            "Scan complete: %d images in %.1fs (%d skipped)",
+            len(self.img_ids), elapsed, skipped,
+        )
+
+        self._save_index_cache(
+            cache_path, img_dir, label_dir,
+            len(img_files), label_files_count,
+        )
+
+    @staticmethod
+    def _index_cache_path(img_dir):
+        parent = os.path.dirname(os.path.abspath(img_dir.rstrip(os.sep)))
+        base = os.path.basename(os.path.abspath(img_dir.rstrip(os.sep)))
+        return os.path.join(parent, f'.safedet_{base}_index.json')
+
+    def _load_index_cache(self, cache_path, img_dir, label_dir,
+                          n_images, n_labels):
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+        except Exception as exc:
+            logger.warning("Ignoring corrupt index cache %s: %s", cache_path, exc)
+            return None
+
+        meta = data.get('meta', {})
+        if (meta.get('version') != _INDEX_CACHE_VERSION
+                or meta.get('img_dir') != os.path.abspath(img_dir)
+                or meta.get('label_dir') != os.path.abspath(label_dir)
+                or meta.get('n_images') != n_images
+                or meta.get('n_labels') != n_labels):
+            logger.info(
+                "Index cache %s is stale (file count or paths changed); rescanning",
+                cache_path,
+            )
+            return None
+
+        try:
+            images = {int(k): v for k, v in data['images'].items()}
+            img_ids = list(data['img_ids'])
+            annotations = {int(k): v for k, v in data['annotations'].items()}
+            return images, img_ids, annotations
+        except Exception as exc:
+            logger.warning("Could not parse index cache %s: %s", cache_path, exc)
+            return None
+
+    def _save_index_cache(self, cache_path, img_dir, label_dir,
+                          n_images, n_labels):
+        payload = {
+            'meta': {
+                'version': _INDEX_CACHE_VERSION,
+                'img_dir': os.path.abspath(img_dir),
+                'label_dir': os.path.abspath(label_dir),
+                'n_images': n_images,
+                'n_labels': n_labels,
+            },
+            'images': self.images,
+            'img_ids': self.img_ids,
+            'annotations': self.annotations,
+        }
+        # Atomic write: rank-unique tmp name + os.replace. Multiple ranks
+        # may write concurrently; the last one wins, which is fine because
+        # they produce identical content.
+        tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_path, 'w') as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, cache_path)
+            logger.info("Wrote dataset index cache: %s", cache_path)
+        except Exception as exc:
+            logger.warning("Failed to write index cache %s: %s", cache_path, exc)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
 
     def __len__(self):
         return len(self.img_ids)
