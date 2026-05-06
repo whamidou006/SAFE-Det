@@ -25,10 +25,10 @@ echo " Config: ${CONFIG}"
 echo " GPUs: ${GPUS} (${NUM_GPUS} devices)"
 echo "=========================================="
 
-# Activate conda env
-CONDA_PREFIX=${CONDA_PREFIX:-/home/whamidouche/ssdprivate/conda_envs/fire-smoke-rtdetrv4}
+# Activate conda env (override with $CONDA_PREFIX if your env lives elsewhere).
+CONDA_PREFIX=${CONDA_PREFIX:-/home/whamidouche/ssdprivate/conda_envs/condor-bench}
 
-cd /home/whamidouche/ssdprivate/fire-smoke-ccpe
+cd "$(dirname "$0")/.."
 
 ${CONDA_PREFIX}/bin/torchrun \
     --nproc_per_node=${NUM_GPUS} \

@@ -1,0 +1,56 @@
+# FireSight-DFINE: DINOv2-Small + SAFE (DCM+FAM+TM) + D-FINE decoder head
+# Uses the user's local Condor-evaluation rtv4 implementation for the head,
+# Hungarian matcher, and DETR-style criterion. Override `dfine_source` if
+# Condor-evaluation lives elsewhere on your machine.
+
+model:
+  type: firesight
+  num_classes: 2
+  backbone_type: dinov2
+  backbone_channels: 256
+  freeze_backbone: false
+  use_dcm: true
+  use_fam: true
+  use_tm: true
+  use_temporal: false
+  head_type: dfine        # <-- triggers DFINEHeadAdapter + RTv4Criterion + PostProcessor
+  # Optional overrides:
+  # dfine_source: /path/to/Condor-evaluation
+  # dfine_kwargs: { num_queries: 300, num_decoder_layers: 6 }
+  input_size: [1022, 1022]
+
+data:
+  train_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/images
+  train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
+  val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
+  val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
+  batch_size: 2          # DINOv2 + D-FINE decoder is memory-heavy at 1024p
+  num_workers: 8
+  mosaic_prob: 1.0
+  mixup_prob: 0.5
+
+# AdamW is the standard recipe for DETR-family models.
+optimizer:
+  name: adamw
+  lr: 0.0001
+  weight_decay: 0.0001
+
+# Hungarian-matched DETR loss is wired automatically when head_type=='dfine'.
+# These optional knobs forward into build_dfine_criterion(...).
+loss:
+  dfine_weight_dict:
+    loss_focal: 1.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+  dfine_losses: [focal, boxes]
+  dfine_reg_max: 32
+
+training:
+  max_epochs: 60
+  warmup_epochs: 3
+  val_interval: 5
+  save_interval: 10
+  grad_clip: 35.0
+
+output_dir: runs/firesight_dfine_1024
+log_interval: 50

@@ -1,5 +1,9 @@
-# FireSight-S: DINOv2-Small + SAFE (DCM+FAM+TM) + YOLOX Head
-# Novel architecture for fire/smoke detection
+# FireSight-S + NWD loss + TAL assigner.
+# This config exercises the optional smoke/fire-detection enhancements
+# discussed in `safedet_testable_proposals.md`:
+#   - Normalized Wasserstein Distance loss for tiny-object regression
+#   - Task-Aligned (TAL) label assignment (replaces SimOTA)
+# Use it as a drop-in ablation against `firesight_s_1024.yaml`.
 
 model:
   type: firesight
@@ -7,19 +11,19 @@ model:
   backbone_type: dinov2
   backbone_channels: 256
   freeze_backbone: false
-  use_dcm: true          # Deformable Contrast Module
-  use_fam: true          # Frequency Attention Module  
-  use_tm: true           # Transparency Modeling
-  use_temporal: false    # Single-frame (no temporal)
+  use_dcm: true
+  use_fam: true
+  use_tm: true
+  use_temporal: false
   head_type: yolox
-  input_size: [1022, 1022]  # Must be divisible by 14 (DINOv2 patch size)
+  input_size: [1022, 1022]
 
 data:
   train_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/images
   train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
   val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
   val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
-  batch_size: 2  # DINOv2 + SAFE is memory-heavy
+  batch_size: 2
   num_workers: 8
   mosaic_prob: 1.0
   mixup_prob: 0.5
@@ -29,6 +33,16 @@ optimizer:
   momentum: 0.9
   weight_decay: 0.0005
 
+loss:
+  bbox_loss_type: mixed   # 'ciou' | 'nwd' | 'mixed' (NWD + CIoU)
+  nwd_constant: 12.8
+  nwd_mix_weight: 0.5
+  assigner: tal           # 'simota' | 'tal' | 'dsla'
+  # assigner_kwargs:
+  #   topk: 13
+  #   alpha: 1.0
+  #   beta: 6.0
+
 training:
   max_epochs: 60
   warmup_epochs: 3
@@ -36,5 +50,5 @@ training:
   save_interval: 10
   grad_clip: 35.0
 
-output_dir: runs/firesight_s_1024
+output_dir: runs/firesight_s_nwd_tal_1024
 log_interval: 50

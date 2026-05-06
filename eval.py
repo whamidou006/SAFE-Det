@@ -13,8 +13,14 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast
 
-from models import CCPE_Detector
+from models import CCPE_Detector, FireSightDetector
 from utils.dataset import FireSmokeDataset, collate_fn
+
+# Re-export the build_model dispatcher so eval picks the right architecture.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from train import build_model
 
 
 def parse_args():
@@ -79,40 +85,90 @@ def evaluate(model, dataloader, num_classes, conf_thresh, iou_thresh, device):
     all_detections = []  # (img_idx, class, conf, x1, y1, x2, y2)
     all_targets = []  # (img_idx, class, x1, y1, x2, y2)
 
+    base = model.module if hasattr(model, 'module') else model
+    head_type = getattr(base, 'head_type', 'yolox')
+
+    dfine_postproc = None
+    if head_type == 'dfine':
+        from models.firesight.dfine_runtime import build_dfine_postprocessor
+        dfine_postproc = build_dfine_postprocessor(
+            num_classes=num_classes,
+            num_top_queries=300,
+        ).to(device).eval()
+
     img_offset = 0
     with torch.no_grad():
         for imgs, targets, indices in dataloader:
             imgs = imgs.to(device)
             with autocast(dtype=torch.bfloat16):
-                preds = model(imgs)  # (B, N, 4+num_classes)
+                preds = model(imgs)
 
-            preds = preds.cpu().numpy()
-            B = preds.shape[0]
+            B = imgs.shape[0]
 
-            for b in range(B):
-                pred = preds[b]
-                # pred: (N, 4+num_classes) — x1,y1,x2,y2,score_per_class
-                for cls in range(num_classes):
-                    scores = pred[:, 4 + cls]
+            if head_type == 'dfine':
+                # preds is a dict of query outputs; convert to per-image
+                # {'labels','boxes','scores'} via the rtv4 PostProcessor.
+                H = imgs.shape[2]
+                W = imgs.shape[3]
+                # PostProcessor uses (W, H) per its xyxy denormalisation.
+                orig_target_sizes = torch.tensor(
+                    [[W, H]] * B, dtype=torch.long, device=device,
+                )
+                results = dfine_postproc(
+                    {'pred_logits': preds['pred_logits'].float(),
+                     'pred_boxes': preds['pred_boxes'].float()},
+                    orig_target_sizes,
+                )
+                for b in range(B):
+                    r = results[b]
+                    labels = r['labels'].cpu().numpy()
+                    boxes = r['boxes'].cpu().numpy()
+                    scores = r['scores'].cpu().numpy()
                     mask = scores > conf_thresh
-                    if mask.sum() == 0:
-                        continue
-                    boxes = pred[mask, :4]
-                    cls_scores = scores[mask]
-                    keep = nms(boxes, cls_scores, iou_thresh)
-                    for k in keep:
+                    labels = labels[mask]
+                    boxes = boxes[mask]
+                    scores = scores[mask]
+                    for k in range(scores.shape[0]):
                         all_detections.append(
-                            (img_offset + b, cls, cls_scores[k],
-                             boxes[k, 0], boxes[k, 1], boxes[k, 2], boxes[k, 3])
+                            (img_offset + b, int(labels[k]), float(scores[k]),
+                             float(boxes[k, 0]), float(boxes[k, 1]),
+                             float(boxes[k, 2]), float(boxes[k, 3]))
                         )
+                    # Ground truth (same format as YOLOX path).
+                    tgt = targets[b]
+                    if tgt.shape[0] > 0:
+                        for t in tgt:
+                            cls = int(t[0].item())
+                            x1, y1, w, h = (t[1].item(), t[2].item(),
+                                            t[3].item(), t[4].item())
+                            all_targets.append((img_offset + b, cls,
+                                                x1, y1, x1 + w, y1 + h))
+            else:
+                preds_np = preds.cpu().numpy()
+                for b in range(B):
+                    pred = preds_np[b]
+                    # pred: (N, 4+num_classes) — x1,y1,x2,y2,score_per_class
+                    for cls in range(num_classes):
+                        scores = pred[:, 4 + cls]
+                        mask = scores > conf_thresh
+                        if mask.sum() == 0:
+                            continue
+                        boxes = pred[mask, :4]
+                        cls_scores = scores[mask]
+                        keep = nms(boxes, cls_scores, iou_thresh)
+                        for k in keep:
+                            all_detections.append(
+                                (img_offset + b, cls, cls_scores[k],
+                                 boxes[k, 0], boxes[k, 1], boxes[k, 2], boxes[k, 3])
+                            )
 
-                # Ground truth
-                tgt = targets[b]
-                if tgt.shape[0] > 0:
-                    for t in tgt:
-                        cls = int(t[0].item())
-                        x1, y1, w, h = t[1].item(), t[2].item(), t[3].item(), t[4].item()
-                        all_targets.append((img_offset + b, cls, x1, y1, x1 + w, y1 + h))
+                    # Ground truth
+                    tgt = targets[b]
+                    if tgt.shape[0] > 0:
+                        for t in tgt:
+                            cls = int(t[0].item())
+                            x1, y1, w, h = t[1].item(), t[2].item(), t[3].item(), t[4].item()
+                            all_targets.append((img_offset + b, cls, x1, y1, x1 + w, y1 + h))
 
             img_offset += B
 
@@ -194,16 +250,7 @@ def main():
 
     # Model
     model_cfg = cfg['model']
-    model = CCPE_Detector(
-        num_classes=model_cfg['num_classes'],
-        in_channels=model_cfg.get('in_channels', 3),
-        embed_dims=model_cfg.get('embed_dims', 96),
-        depths=tuple(model_cfg.get('depths', [2, 2, 6, 2])),
-        num_heads=tuple(model_cfg.get('num_heads', [3, 6, 12, 24])),
-        window_size=model_cfg.get('window_size', 7),
-        fpn_channels=model_cfg.get('fpn_channels', 128),
-        input_size=tuple(model_cfg.get('input_size', [1024, 1024])),
-    )
+    model = build_model(cfg)
 
     # Load checkpoint
     ckpt = torch.load(args.checkpoint, map_location='cpu')

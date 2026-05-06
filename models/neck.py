@@ -5,6 +5,7 @@ Path Aggregation Feature Pyramid Network with CSP bottlenecks.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ConvBNAct(nn.Module):
@@ -114,7 +115,3 @@ class YOLOXPAFPN(nn.Module):
             ))
 
         return tuple(outs)
-
-
-# Need F for interpolate
-import torch.nn.functional as F

@@ -16,10 +16,10 @@ model:
 
 data:
   # For multi-frame, dataset loader concatenates current+previous frame
-  train_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/images
-  train_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/train/labels
-  val_img_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/images
-  val_label_dir: /home/whamidouche/ssdprivate/fire-smoke-benchmark-package/data/test_random/labels
+  train_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/images
+  train_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/train/labels
+  val_img_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/images
+  val_label_dir: /home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/test_random/labels
   batch_size: 4
   num_workers: 8
   mosaic_prob: 1.0

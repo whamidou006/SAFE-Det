@@ -26,9 +26,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.cuda.amp import GradScaler, autocast
 
-from models import CCPE_Detector
+from models import CCPE_Detector, FireSightDetector
 from utils.dataset import FireSmokeDataset, collate_fn
-from utils.assigner import SimOTAAssigner
+from utils.assigner import SimOTAAssigner, build_assigner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +36,48 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+
+def build_model(cfg: dict):
+    """Instantiate either CCPE_Detector or FireSightDetector based on
+    ``cfg['model']['type']`` (defaults to 'ccpe' for back-compat).
+
+    Raises ValueError on an unknown type so silently-mis-configured runs
+    fail loudly.
+    """
+    model_cfg = cfg['model']
+    model_type = model_cfg.get('type', 'ccpe').lower()
+
+    if model_type == 'ccpe':
+        return CCPE_Detector(
+            num_classes=model_cfg['num_classes'],
+            in_channels=model_cfg.get('in_channels', 3),
+            embed_dims=model_cfg.get('embed_dims', 96),
+            depths=tuple(model_cfg.get('depths', [2, 2, 6, 2])),
+            num_heads=tuple(model_cfg.get('num_heads', [3, 6, 12, 24])),
+            window_size=model_cfg.get('window_size', 7),
+            fpn_channels=model_cfg.get('fpn_channels', 128),
+            input_size=tuple(model_cfg.get('input_size', [1024, 1024])),
+            contrast_steps=model_cfg.get('contrast_steps'),
+            use_checkpoint=model_cfg.get('use_checkpoint', False),
+            pretrained_swin=model_cfg.get('pretrained_swin'),
+        )
+    if model_type == 'firesight':
+        return FireSightDetector(
+            num_classes=model_cfg['num_classes'],
+            backbone_type=model_cfg.get('backbone_type', 'dinov2'),
+            backbone_channels=model_cfg.get('backbone_channels', 256),
+            use_dcm=model_cfg.get('use_dcm', True),
+            use_fam=model_cfg.get('use_fam', True),
+            use_tm=model_cfg.get('use_tm', True),
+            use_temporal=model_cfg.get('use_temporal', False),
+            head_type=model_cfg.get('head_type', 'yolox'),
+            freeze_backbone=model_cfg.get('freeze_backbone', False),
+            input_size=tuple(model_cfg.get('input_size', [1024, 1024])),
+        )
+    raise ValueError(
+        f"Unknown model.type {model_type!r} — expected 'ccpe' or 'firesight'."
+    )
 
 
 def parse_args():
@@ -66,14 +108,25 @@ def load_config(path):
 
 
 class YOLOXLoss:
-    """YOLOX loss with SimOTA assignment and SNSM."""
+    """YOLOX loss with SimOTA assignment and SNSM.
 
-    def __init__(self, num_classes, strides=(8, 16, 32), img_size=1024):
+    The bbox regression term is dispatched through `models.losses_nwd.bbox_loss`
+    so it can optionally use NWD or a CIoU/NWD mix instead of plain IoU.
+    Default behaviour is unchanged (`bbox_loss_type='ciou'`).
+    """
+
+    def __init__(self, num_classes, strides=(8, 16, 32), img_size=1024,
+                 bbox_loss_type='ciou', nwd_constant=12.8, nwd_mix_weight=0.5,
+                 assigner='simota', assigner_kwargs=None):
         self.num_classes = num_classes
         self.strides = strides
         self.img_size = img_size
-        self.assigner = SimOTAAssigner(center_radius=2.5)
+        self.assigner = build_assigner(assigner, **(assigner_kwargs or {}))
         self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        # bbox-regression loss config (see models/losses_nwd.py).
+        self.bbox_loss_type = bbox_loss_type
+        self.nwd_constant = nwd_constant
+        self.nwd_mix_weight = nwd_mix_weight
 
     def __call__(self, cls_scores, bbox_preds, obj_scores, targets, model_head):
         """
@@ -118,9 +171,12 @@ class YOLOXLoss:
         pred_x2y2 = pred_xy + pred_wh / 2
         pred_boxes = torch.cat([pred_x1y1, pred_x2y2], dim=-1)
 
-        total_cls_loss = 0
-        total_bbox_loss = 0
-        total_obj_loss = 0
+        # Initialise as zero-tensors so accumulation stays in tensor-land even
+        # when no positive sample exists in any image (purely-negative batch).
+        zero = flat_cls.new_zeros(())
+        total_cls_loss = zero.clone()
+        total_bbox_loss = zero.clone()
+        total_obj_loss = zero.clone()
         num_fg = 0
 
         for b in range(B):
@@ -128,7 +184,7 @@ class YOLOXLoss:
             if tgt.shape[0] == 0:
                 # Negative image — only objectness loss
                 obj_target = torch.zeros(N, 1, device=device)
-                total_obj_loss += self.bce(flat_obj[b], obj_target).sum()
+                total_obj_loss = total_obj_loss + self.bce(flat_obj[b], obj_target).sum()
                 continue
 
             # Convert targets from [cls, x1, y1, w, h] to [x1, y1, x2, y2]
@@ -153,19 +209,19 @@ class YOLOXLoss:
 
             # Objectness target
             obj_target = fg_mask.float().unsqueeze(-1)
-            total_obj_loss += self.bce(flat_obj[b], obj_target).sum()
+            total_obj_loss = total_obj_loss + self.bce(flat_obj[b], obj_target).sum()
 
             if num_fg_this > 0:
                 # Classification loss (only for positive anchors)
                 cls_target = F.one_hot(assigned_labels[fg_mask], self.num_classes).float()
                 cls_pred = flat_cls[b][fg_mask]
-                total_cls_loss += self.bce(cls_pred, cls_target).sum()
+                total_cls_loss = total_cls_loss + self.bce(cls_pred, cls_target).sum()
 
                 # IoU loss
                 pred_fg = pred_boxes[b][fg_mask]
                 gt_fg = assigned_bboxes[fg_mask]
                 iou_loss = self._iou_loss(pred_fg, gt_fg)
-                total_bbox_loss += iou_loss.sum()
+                total_bbox_loss = total_bbox_loss + iou_loss.sum()
 
         num_fg = max(num_fg, 1)
         loss_cls = total_cls_loss / num_fg
@@ -181,16 +237,17 @@ class YOLOXLoss:
         }
 
     def _iou_loss(self, pred, target):
-        """IoU loss (1 - IoU)."""
-        lt = torch.max(pred[:, :2], target[:, :2])
-        rb = torch.min(pred[:, 2:], target[:, 2:])
-        wh = (rb - lt).clamp(min=0)
-        inter = wh[:, 0] * wh[:, 1]
-        area_pred = (pred[:, 2] - pred[:, 0]) * (pred[:, 3] - pred[:, 1])
-        area_target = (target[:, 2] - target[:, 0]) * (target[:, 3] - target[:, 1])
-        union = area_pred + area_target - inter
-        iou = inter / union.clamp(min=1e-6)
-        return 1 - iou
+        """Per-box bbox regression loss. Dispatches to NWD or CIoU/NWD-mix
+        when the corresponding config flag is set; otherwise plain 1-IoU.
+        Kept under the same name to preserve the original call site
+        unchanged."""
+        from models.losses_nwd import bbox_loss
+        return bbox_loss(
+            pred, target,
+            loss_type=self.bbox_loss_type,
+            nwd_constant=self.nwd_constant,
+            nwd_mix_weight=self.nwd_mix_weight,
+        )
 
 
 def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, cfg):
@@ -200,15 +257,33 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
     log_interval = cfg.get('log_interval', 50)
     start_time = time.time()
 
+    base = model.module if hasattr(model, 'module') else model
+    head_type = getattr(base, 'head_type', 'yolox')
+    img_size = cfg['model'].get('input_size', [1024, 1024])[0]
+
     for batch_idx, (imgs, targets, _) in enumerate(dataloader):
         imgs = imgs.cuda(non_blocking=True)
 
         optimizer.zero_grad()
 
         with autocast(dtype=torch.bfloat16):
-            cls_scores, bbox_preds, obj_scores = model(imgs)
-            loss, loss_dict = loss_fn(cls_scores, bbox_preds, obj_scores, targets,
-                                      model.module.head if hasattr(model, 'module') else model.head)
+            if head_type == 'dfine':
+                # Pass targets into the model so the contrastive
+                # denoising group can be built inside DFINETransformer.
+                from models.firesight.dfine_runtime import (
+                    convert_yolox_targets_to_dfine,
+                )
+                dfine_targets = convert_yolox_targets_to_dfine(
+                    targets, img_size=img_size, device=imgs.device,
+                )
+                outputs = model(imgs, targets=dfine_targets)
+                loss, loss_dict = loss_fn(outputs, targets, img_size)
+            else:
+                cls_scores, bbox_preds, obj_scores = model(imgs)
+                loss, loss_dict = loss_fn(
+                    cls_scores, bbox_preds, obj_scores, targets,
+                    base.head,
+                )
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -223,9 +298,10 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
             elapsed = time.time() - start_time
             logger.info(
                 f"Epoch {epoch} [{batch_idx}/{len(dataloader)}] "
-                f"loss={loss.item():.4f} cls={loss_dict['loss_cls']:.4f} "
-                f"bbox={loss_dict['loss_bbox']:.4f} obj={loss_dict['loss_obj']:.4f} "
-                f"fg={loss_dict['num_fg']} elapsed={elapsed:.1f}s"
+                f"loss={loss.item():.4f} cls={loss_dict.get('loss_cls', 0.0):.4f} "
+                f"bbox={loss_dict.get('loss_bbox', 0.0):.4f} "
+                f"obj={loss_dict.get('loss_obj', 0.0):.4f} "
+                f"fg={loss_dict.get('num_fg', 0)} elapsed={elapsed:.1f}s"
             )
 
     avg_loss = total_loss / max(num_batches, 1)
@@ -235,16 +311,34 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
 
 
 @torch.no_grad()
-def validate(model, dataloader, loss_fn, rank):
+def validate(model, dataloader, loss_fn, rank, cfg):
+    """Compute validation loss. Dispatches on the model's head_type so the
+    same function works for the YOLOX path and the D-FINE / DETR path
+    (which returns a dict instead of a 3-tuple from forward())."""
     model.eval()
     total_loss = 0
     num_batches = 0
 
+    base = model.module if hasattr(model, 'module') else model
+    head_type = getattr(base, 'head_type', 'yolox')
+    img_size = cfg['model'].get('input_size', [1024, 1024])[0]
+
     for imgs, targets, _ in dataloader:
         imgs = imgs.cuda(non_blocking=True)
         with autocast(dtype=torch.bfloat16):
-            cls_scores, bbox_preds, obj_scores = model(imgs)
-            loss, _ = loss_fn(cls_scores, bbox_preds, obj_scores, targets, None)
+            if head_type == 'dfine':
+                from models.firesight.dfine_runtime import (
+                    convert_yolox_targets_to_dfine,
+                )
+                dfine_targets = convert_yolox_targets_to_dfine(
+                    targets, img_size=img_size, device=imgs.device,
+                )
+                outputs = model(imgs, targets=dfine_targets)
+                loss, _ = loss_fn(outputs, targets, img_size)
+            else:
+                cls_scores, bbox_preds, obj_scores = model(imgs)
+                loss, _ = loss_fn(cls_scores, bbox_preds, obj_scores,
+                                  targets, base.head)
         total_loss += loss.item()
         num_batches += 1
 
@@ -268,19 +362,7 @@ def main():
 
     # Model
     model_cfg = cfg['model']
-    model = CCPE_Detector(
-        num_classes=model_cfg['num_classes'],
-        in_channels=model_cfg.get('in_channels', 3),
-        embed_dims=model_cfg.get('embed_dims', 96),
-        depths=tuple(model_cfg.get('depths', [2, 2, 6, 2])),
-        num_heads=tuple(model_cfg.get('num_heads', [3, 6, 12, 24])),
-        window_size=model_cfg.get('window_size', 7),
-        fpn_channels=model_cfg.get('fpn_channels', 128),
-        input_size=tuple(model_cfg.get('input_size', [1024, 1024])),
-        contrast_steps=model_cfg.get('contrast_steps'),
-        use_checkpoint=model_cfg.get('use_checkpoint', False),
-        pretrained_swin=model_cfg.get('pretrained_swin')
-    )
+    model = build_model(cfg)
 
     model.cuda()
     if is_main:
@@ -336,14 +418,30 @@ def main():
     # Optimizer
     opt_cfg = cfg.get('optimizer', {})
     lr = opt_cfg.get('lr', 0.0001)
+    base_lrs = []
     weight_decay = opt_cfg.get('weight_decay', 5e-4)
 
-    param_groups = (model.module if hasattr(model, 'module') else model).get_param_groups(lr, weight_decay)
-    optimizer = torch.optim.SGD(
-        param_groups,
-        momentum=opt_cfg.get('momentum', 0.9),
-        nesterov=True
-    )
+    # FireSightDetector does not have get_param_groups; build one default group.
+    base = model.module if hasattr(model, 'module') else model
+    if hasattr(base, 'get_param_groups'):
+        param_groups = base.get_param_groups(lr, weight_decay)
+    else:
+        param_groups = [{'params': [p for p in base.parameters() if p.requires_grad],
+                         'lr': lr, 'weight_decay': weight_decay}]
+
+    opt_name = opt_cfg.get('name', 'sgd').lower()
+    if opt_name == 'sgd':
+        optimizer = torch.optim.SGD(
+            param_groups, momentum=opt_cfg.get('momentum', 0.9), nesterov=True
+        )
+    elif opt_name == 'adamw':
+        optimizer = torch.optim.AdamW(param_groups)
+    else:
+        raise ValueError(f"Unknown optimizer.name {opt_name!r}")
+
+    # Cache base LR per param group so warmup can multiply *that* (not the
+    # already-warmed-up LR, which compounds).
+    base_lrs = [pg['lr'] for pg in optimizer.param_groups]
 
     # Scheduler
     train_cfg = cfg.get('training', {})
@@ -355,10 +453,33 @@ def main():
     )
 
     # Loss
-    loss_fn = YOLOXLoss(
-        num_classes=model_cfg['num_classes'],
-        img_size=model_cfg.get('input_size', [1024, 1024])[0]
-    )
+    loss_cfg = cfg.get('loss', {})
+    base_for_head = model.module if hasattr(model, 'module') else model
+    head_type = getattr(base_for_head, 'head_type', 'yolox')
+    if head_type == 'dfine':
+        # D-FINE uses a Hungarian-matching DETR-style criterion that is
+        # incompatible with YOLOXLoss's API. Build the wrapper from
+        # dfine_runtime, which converts targets and exposes the same
+        # (loss, log_dict) tuple train_one_epoch expects.
+        from models.firesight.dfine_runtime import build_dfine_criterion
+        model_node = cfg['model']
+        loss_fn = build_dfine_criterion(
+            num_classes=model_cfg['num_classes'],
+            source=model_node.get('dfine_source'),
+            weight_dict=loss_cfg.get('dfine_weight_dict'),
+            losses=loss_cfg.get('dfine_losses'),
+            reg_max=loss_cfg.get('dfine_reg_max', 32),
+        )
+    else:
+        loss_fn = YOLOXLoss(
+            num_classes=model_cfg['num_classes'],
+            img_size=model_cfg.get('input_size', [1024, 1024])[0],
+            bbox_loss_type=loss_cfg.get('bbox_loss_type', 'ciou'),
+            nwd_constant=loss_cfg.get('nwd_constant', 12.8),
+            nwd_mix_weight=loss_cfg.get('nwd_mix_weight', 0.5),
+            assigner=loss_cfg.get('assigner', 'simota'),
+            assigner_kwargs=loss_cfg.get('assigner_kwargs', None),
+        )
 
     # AMP scaler
     scaler = GradScaler()
@@ -384,11 +505,16 @@ def main():
         if train_sampler:
             train_sampler.set_epoch(epoch)
 
-        # Warmup LR
-        if epoch < warmup_epochs:
+        # Warmup LR: linearly ramp from 1/warmup_epochs of base LR up to base.
+        # Use cached base_lrs so we don't compound the multiplier each epoch.
+        if epoch < warmup_epochs and warmup_epochs > 0:
             warmup_factor = (epoch + 1) / warmup_epochs
-            for pg in optimizer.param_groups:
-                pg['lr'] = pg['lr'] * warmup_factor
+            for pg, base_lr in zip(optimizer.param_groups, base_lrs):
+                pg['lr'] = base_lr * warmup_factor
+        elif epoch == warmup_epochs:
+            # Reset to base LR exactly when warmup completes.
+            for pg, base_lr in zip(optimizer.param_groups, base_lrs):
+                pg['lr'] = base_lr
 
         train_loss = train_one_epoch(model, train_loader, optimizer, scaler, loss_fn, epoch, rank, cfg)
 
@@ -397,7 +523,7 @@ def main():
 
         # Validation
         if (epoch + 1) % train_cfg.get('val_interval', 5) == 0:
-            val_loss = validate(model, val_loader, loss_fn, rank)
+            val_loss = validate(model, val_loader, loss_fn, rank, cfg)
 
             if is_main and val_loss < best_loss:
                 best_loss = val_loss

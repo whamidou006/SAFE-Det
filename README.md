@@ -1,114 +1,205 @@
 # SAFE-Det — Smoke-Aware Feature Enhancement Detector
 
-Novel fire/smoke detection architecture for wildfire early warning systems.
+Novel fire/smoke detection architecture for wildfire early-warning systems.
 Combines ideas from CCPE (Wang et al., IJIS 2025) with modern vision transformers
-and domain-specific innovations.
+and domain-specific innovations (DCM/FAM/TM/Temporal), and supports a D-FINE
+DETR-style head for production parity with the user's Condor-evaluation stack.
 
-## Architectures
+---
 
-### CCPE Baseline (reimplemented)
+## 1. Architectures
+
+### CCPE Baseline (re-implemented)
 - **Backbone**: Swin Transformer + Cross Contrast Patch Embedding (CCPE)
 - **Neck**: YOLOX-style PAFPN
 - **Head**: YOLOX + Separable Negative Sampling Mechanism (SNSM)
-- **Key idea**: Multi-scale spatial contrast (1-128px shifts) captures soft smoke edges
 
-### FireSight (novel — our contribution)
+### FireSight (novel)
 - **Backbone**: DINOv2 ViT (self-supervised, much stronger features)
-- **SAFE modules**:
-  - **DCM** — Deformable Contrast Module: learned spatial offsets (replaces fixed shifts)
-  - **FAM** — Frequency Attention Module: frequency-domain channel reweighting
-  - **TM** — Transparency Module: feature-level background subtraction for semi-transparent smoke
-  - **Temporal Motion Fusion**: motion-guided cross-frame attention
-- **Head**: YOLOX + SNSM (or DETR decoder)
+- **SAFE modules** (any combination): DCM (Deformable Contrast), FAM (Frequency
+  Attention), TM (Transparency), Temporal Motion Fusion
+- **Head**: YOLOX (default) **or** D-FINE decoder (`head_type: dfine`)
 
-## Model Variants
+---
 
-| Config | Backbone | SAFE | Temporal | Params | Description |
-|--------|----------|------|----------|--------|-------------|
-| `ccpe_single_1024` | Swin-T + CCPE | — | No | ~30M | CCPE baseline, single-frame |
-| `ccpe_multi_1024` | Swin-T + CCPE | — | 6ch concat | ~30M | CCPE multi-frame |
-| `ccpe_base_1024` | Swin-B + CCPE | — | No | ~88M | CCPE larger backbone |
-| `firesight_s_1024` | DINOv2-S | DCM+FAM+TM | No | ~35M | FireSight single-frame |
-| `firesight_st_1024` | DINOv2-S | DCM+FAM+TM | Yes | ~40M | FireSight with temporal |
+## 2. Environment
 
-## Dataset
+```bash
+# Conda env with torch ≥ 2.0, torchvision ≥ 0.20, opencv, scipy, pyyaml
+conda activate /home/whamidouche/ssdprivate/conda_envs/condor-bench
 
-ALERTCalifornia wildfire detection dataset (YOLO format):
-- **Train**: 178,394 images, 2 classes (smoke=0, fire=1)
-- **Val**: 9,888 images (same cameras as train)
-- **Test**: 4,967 images (40 unseen cameras — generalization test)
+# Repo deps
+cd /home/whamidouche/ssdprivate/SAFE-Det
+pip install -r requirements.txt
 
-## Usage
+# Run the test suite (67 tests; should pass before training)
+pytest -q
+```
 
-### Training
+> **D-FINE head only.** The `head_type: dfine` option imports the user's
+> `engine.rtv4` package from a local Condor-evaluation checkout. Default
+> search path is `/home/whamidouche/ssdprivate/Condor-evaluation`. Override
+> with `cfg.model.dfine_source: /alt/path` or `export
+> CONDOR_EVALUATION_ROOT=/alt/path`.
+
+---
+
+## 3. Dataset
+
+Default ALERT-California layout (YOLO format), pre-pointed in every config:
+
+```
+/home/whamidouche/ssdprivate/datasets/data_v3_and_imerit_upto_april06_2classes_40_unseen_cams_cleaned/
+├── train/{images,labels}        # 159,211 frames
+├── test_random/{images,labels}  #   8,801 frames (same cameras as train)
+└── test_disjoint/{images,labels}#   4,967 frames (40 unseen cameras)
+```
+
+Classes: `smoke=0, fire=1`. To use a different dataset, edit the four
+`*_img_dir` / `*_label_dir` lines at the top of any config.
+
+---
+
+## 4. Available configs
+
+| Config | Backbone | Modules | Head | Loss / assigner | Params |
+|---|---|---|---|---|---|
+| `ccpe_single_1024.yaml`        | Swin-T + CCPE | — | YOLOX | CIoU + SimOTA | ~30M |
+| `ccpe_multi_1024.yaml`         | Swin-T + CCPE | 6-ch concat | YOLOX | CIoU + SimOTA | ~30M |
+| `ccpe_base_1024.yaml`          | Swin-B + CCPE | — | YOLOX | CIoU + SimOTA | ~88M |
+| `firesight_s_1024.yaml`        | DINOv2-S | DCM+FAM+TM | YOLOX | CIoU + SimOTA | ~29M |
+| `firesight_st_1024.yaml`       | DINOv2-S | DCM+FAM+TM + Temporal | YOLOX | CIoU + SimOTA | ~31M |
+| `firesight_s_nwd_tal_1024.yaml`| DINOv2-S | DCM+FAM+TM | YOLOX | **NWD+CIoU + TAL** | ~29M |
+| `firesight_dfine_1024.yaml`    | DINOv2-S | DCM+FAM+TM | **D-FINE** | Hungarian + Focal/L1/GIoU | ~35M |
+
+---
+
+## 5. Training — one command per variant
+
+All configs use bf16 autocast under the hood. Single-GPU is for smoke-tests;
+production runs should use `train_ddp.sh` for multi-GPU DDP.
+
+### 5.1 CCPE baselines (Swin + CCPE + YOLOX)
 
 ```bash
 # Single-GPU
 python train.py --config configs/ccpe_single_1024.yaml --gpu 0
 
-# Multi-GPU DDP (4 GPUs: 0,1,2,3)
+# 4-GPU DDP
 bash scripts/train_ddp.sh configs/ccpe_single_1024.yaml 0,1,2,3
 
-# FireSight on specific GPUs
+# Multi-frame variant (concatenated 6-channel input)
+bash scripts/train_ddp.sh configs/ccpe_multi_1024.yaml 0,1,2,3
+
+# Larger backbone (Swin-B)
+bash scripts/train_ddp.sh configs/ccpe_base_1024.yaml 0,1,2,3
+```
+
+### 5.2 FireSight — DINOv2 + SAFE modules, YOLOX head
+
+```bash
+# Single-frame
 bash scripts/train_ddp.sh configs/firesight_s_1024.yaml 0,1,2,3
+
+# Single-frame + temporal motion fusion (needs sequential frames)
+bash scripts/train_ddp.sh configs/firesight_st_1024.yaml 0,1,2,3
 ```
 
-### Evaluation
+### 5.3 FireSight — NWD loss + Task-Aligned assigner ablation
+
+Drop-in replacement for `firesight_s_1024` that swaps the bbox loss to
+**NWD+CIoU** (paper: *A Normalized Gaussian Wasserstein Distance for Tiny
+Object Detection*, CVPR 2022) and the label assigner to **TAL** (TOOD, ICCV
+2021). Useful for the small-smoke recall regime described in
+`safedet_testable_proposals.md`.
 
 ```bash
-# Standard evaluation
-python eval.py --config configs/ccpe_single_1024.yaml --checkpoint runs/ccpe_single_1024/best.pth --gpu 0
-
-# SAHI sliced inference (better for small smoke in large images)
-python eval.py --config configs/ccpe_single_1024.yaml --checkpoint runs/best.pth \
-    --sahi --slice-size 640 --overlap 0.2
-
-# SAHI on test split with custom thresholds
-python eval.py --config configs/firesight_s_1024.yaml --checkpoint runs/firesight_s_1024/best.pth \
-    --split test --sahi --slice-size 512 --overlap 0.3 --conf-thresh 0.3
+bash scripts/train_ddp.sh configs/firesight_s_nwd_tal_1024.yaml 0,1,2,3
 ```
 
-### SAHI (Slicing Aided Hyper Inference) — Optional
+Tunable in the config's `loss:` block:
+- `bbox_loss_type`: `ciou` (default) | `nwd` | `mixed`
+- `nwd_constant`: gaussian kernel size (default `12.8`)
+- `nwd_mix_weight`: NWD weight when `mixed` (default `0.5`)
+- `assigner`: `simota` (default) | `tal` | `dsla`
 
-SAHI tiles large images into overlapping slices, runs detection on each slice,
-then merges results. This dramatically improves detection of small/early smoke
-that would be lost when resizing 1920×1080 → 1024×1024.
+### 5.4 FireSight — D-FINE decoder head
+
+This path uses the rtv4 `DFINETransformer` decoder with the Hungarian-matched
+DETR criterion (`RTv4Criterion`) and the rtv4 `PostProcessor` for evaluation.
+Both training and eval loops dispatch automatically on `head_type: dfine`.
+
+Pre-flight (only once):
 
 ```bash
-pip install sahi  # Install once
+# Make sure Condor-evaluation is reachable from SAFE-Det
+export CONDOR_EVALUATION_ROOT=/home/whamidouche/ssdprivate/Condor-evaluation
+ls $CONDOR_EVALUATION_ROOT/engine/rtv4/dfine_decoder.py    # must exist
 ```
 
-| Mode | Best for | Speed |
-|------|----------|-------|
-| Standard (`--no sahi`) | General evaluation, fast | ~50 img/s |
-| SAHI `--slice-size 640` | Small smoke, high-res cameras | ~5 img/s |
-| SAHI `--slice-size 512 --overlap 0.3` | Maximum recall, tiny objects | ~3 img/s |
+Train:
 
-## Key Innovations
+```bash
+# 4-GPU DDP, recommended
+bash scripts/train_ddp.sh configs/firesight_dfine_1024.yaml 0,1,2,3
 
-### 1. Deformable Contrast Module (DCM)
-Replaces CCPE's fixed pixel shifts with **learned deformable offsets**.
-The network discovers optimal spatial contexts for smoke vs fire discrimination.
-Advantages: content-adaptive, directional freedom, fewer parameters.
+# Single-GPU smoke-test
+python train.py --config configs/firesight_dfine_1024.yaml --gpu 0
+```
 
-### 2. Frequency Attention Module (FAM)
-Decomposes features into frequency bands and reweights channels.
-Smoke has low-frequency body + mid-frequency edges; fire has high-frequency boundaries.
+Customise via the config:
 
-### 3. Transparency Module (TM)
-Models semi-transparent smoke via multi-scale feature subtraction:
-`enhanced = x + α · (x - smooth(x))`. Highlights what differs from local context.
+```yaml
+model:
+  head_type: dfine
+  dfine_source: /alt/Condor-evaluation       # optional override
+  dfine_kwargs: { num_queries: 300, num_decoder_layers: 6 }
+loss:
+  dfine_weight_dict: { loss_focal: 1.0, loss_bbox: 5.0, loss_giou: 2.0 }
+  dfine_losses: [focal, boxes]               # add 'vfl' / 'mal' / 'distill'
+  dfine_reg_max: 32
+```
 
-### 4. Temporal Motion Fusion
-Cross-frame attention guided by motion map. Focuses on regions where temporal
-change indicates smoke growth. Works with 60s and 360s capture intervals.
+---
 
-## Project Structure
+## 6. Evaluation
+
+Same `eval.py` for every architecture — it auto-dispatches on `head_type`
+(YOLOX → greedy NMS, D-FINE → rtv4 `PostProcessor`).
+
+```bash
+# Random-split (same cameras as train)
+python eval.py --config configs/firesight_s_1024.yaml \
+               --checkpoint runs/firesight_s_1024/best.pth \
+               --split val --gpu 0
+
+# Disjoint-camera generalisation test
+python eval.py --config configs/firesight_dfine_1024.yaml \
+               --checkpoint runs/firesight_dfine_1024/best.pth \
+               --split test --gpu 0
+```
+
+Outputs per-class AP50 + precision/recall + mAP50.
+
+---
+
+## 7. Resuming a run
+
+```bash
+python train.py --config configs/firesight_s_1024.yaml \
+                --resume runs/firesight_s_1024/epoch_29.pth --gpu 0
+```
+
+Optimizer state and `best_loss` are restored.
+
+---
+
+## 8. Project structure
 
 ```
 SAFE-Det/
-├── train.py                 # DDP training (torchrun compatible)
-├── eval.py                  # COCO mAP evaluation
+├── train.py                 # DDP training (auto-dispatches YOLOX vs D-FINE)
+├── eval.py                  # COCO mAP eval (auto-dispatches NMS vs PostProcessor)
 ├── configs/                 # YAML configs for all variants
 ├── models/
 │   ├── ccpe_module.py       # Cross Contrast Patch Embedding
@@ -116,18 +207,35 @@ SAFE-Det/
 │   ├── neck.py              # YOLOX PAFPN
 │   ├── head.py              # YOLOX head + SNSM
 │   ├── detector.py          # CCPE detector (baseline)
-│   └── firesight/           # Novel FireSight modules
+│   ├── losses_nwd.py        # Normalized Wasserstein Distance + bbox dispatcher
+│   └── firesight/
+│       ├── firesight_detector.py
 │       ├── deformable_contrast.py
 │       ├── frequency_attention.py
 │       ├── transparency.py
 │       ├── temporal_fusion.py
-│       └── firesight_detector.py
+│       ├── dfine_head.py     # DFINEHeadAdapter (lazy rtv4 import)
+│       └── dfine_runtime.py  # Hungarian criterion + PostProcessor wrappers
 ├── utils/
-│   ├── dataset.py           # COCO/YOLO dataset + augmentation
-│   └── assigner.py          # SimOTA assignment
+│   ├── dataset.py            # YOLO-format dataset + augmentation
+│   └── assigner.py           # SimOTA + TAL + DSLA + build_assigner()
+├── tests/                    # 67 pytest tests — run before training
 └── scripts/
-    └── train_ddp.sh         # Multi-GPU launch script
+    └── train_ddp.sh          # Multi-GPU launch script
 ```
+
+---
+
+## 9. Quick checklist before launching training
+
+1. Activate the conda env: `conda activate .../condor-bench`
+2. `cd /home/whamidouche/ssdprivate/SAFE-Det`
+3. `pytest -q` — must show **67 passed**
+4. (D-FINE only) `ls $CONDOR_EVALUATION_ROOT/engine/rtv4/dfine_decoder.py`
+5. Pick a config from §4 and launch with the matching command from §5
+6. Outputs land in `runs/<config-name>/`
+
+---
 
 ## References
 
@@ -137,6 +245,24 @@ SAFE-Det/
   author={Wang, Chong and Xu, Chen and Akram, Adeel and Wang, Zhong and Shan, Zhilin and Zhang, Qixing},
   journal={International Journal of Intelligent Systems},
   volume={2025},
+  year={2025}
+}
+@inproceedings{xu2022nwd,
+  title={A Normalized Gaussian Wasserstein Distance for Tiny Object Detection},
+  author={Xu, Chang and Wang, Jinwang and Yang, Wen and Yu, Lei},
+  booktitle={CVPR Workshops},
+  year={2022}
+}
+@inproceedings{feng2021tood,
+  title={TOOD: Task-aligned One-stage Object Detection},
+  author={Feng, Chengjian and Zhong, Yujie and Gao, Yu and Scott, Matthew R and Huang, Weilin},
+  booktitle={ICCV},
+  year={2021}
+}
+@inproceedings{peng2024dfine,
+  title={D-FINE: Redefine Regression Task in DETRs as Fine-grained Distribution Refinement},
+  author={Peng, Yansong and Li, Hebei and others},
+  booktitle={ICLR},
   year={2025}
 }
 ```

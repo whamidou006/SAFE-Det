@@ -70,27 +70,27 @@ class FrequencyAttentionModule(nn.Module):
         """
         B, C, H, W = x.shape
 
-        # Extract frequency bands (high-pass by subtraction)
+        # Sequentially smooth x with progressively larger kernels.
+        # band_i = smoothed_{i-1} - smoothed_i  → captures the energy in
+        # the band between two scales. The first band is the *high*-pass
+        # residual, the last is the smoothest low-pass.
         bands = []
         prev = x
-        for i, extractor in enumerate(self.freq_extractors):
-            smoothed = extractor(x)
-            if i == 0:
-                band = x - smoothed  # Highest frequency
-            else:
-                band = bands[-1] if i == 1 else prev
-                band = prev - smoothed  # Difference = band-pass
-            bands.append(band)
+        for extractor in self.freq_extractors:
+            smoothed = extractor(prev)
+            bands.append(prev - smoothed)
             prev = smoothed
-
-        # Remaining = lowest frequency
+        # The remaining smoothest signal is the lowest band.
         bands.append(prev)
 
+        # Take exactly num_freq_bands bands for the fusion + attention.
+        bands = bands[:self.num_freq_bands]
+
         # Pool each band for attention computation
-        band_features = []
-        for band in bands[:self.num_freq_bands]:
-            pooled = F.adaptive_avg_pool2d(band.abs(), 1)  # (B, C, 1, 1)
-            band_features.append(pooled.squeeze(-1).squeeze(-1))
+        band_features = [
+            F.adaptive_avg_pool2d(b.abs(), 1).squeeze(-1).squeeze(-1)
+            for b in bands
+        ]
 
         # Concatenate and compute attention
         freq_descriptor = torch.cat(band_features, dim=1)  # (B, C*num_bands)
@@ -99,7 +99,7 @@ class FrequencyAttentionModule(nn.Module):
 
         # Weight frequency bands and sum
         band_weights = F.softmax(self.band_weights, dim=0)
-        output = sum(w * b for w, b in zip(band_weights, bands[:self.num_freq_bands]))
+        output = sum(w * b for w, b in zip(band_weights, bands))
 
         # Apply channel attention
         return x + output * channel_attn

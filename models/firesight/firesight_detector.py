@@ -8,6 +8,8 @@ Combines:
 - Hybrid detection head (DETR or YOLOX+SNSM)
 """
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -53,6 +55,33 @@ class SAFEModule(nn.Module):
         return x
 
 
+class _FallbackTinyBackbone(nn.Module):
+    """CPU-only ConvNeXt-ish substitute used when DINOv2 cannot be loaded
+    (e.g. no internet, no torch.hub cache). Produces three feature maps of
+    progressively halved spatial resolution and a uniform channel count.
+
+    This is **only** for tests / smoke-runs — it is NOT a meaningful
+    pretrained backbone. To force this path, set the env var
+    ``SAFE_DET_OFFLINE_BACKBONE=1``.
+    """
+
+    def __init__(self, embed_dim: int = 384):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, embed_dim, 7, stride=14, padding=3),
+            nn.GELU(),
+        )
+        # `get_intermediate_layers` is referenced by DINOv2Backbone.forward.
+        # We mimic the API for API-compat.
+
+    def get_intermediate_layers(self, x, n):
+        feat = self.stem(x)                      # (B, C, H/14, W/14)
+        B, C, H, W = feat.shape
+        flat = feat.flatten(2).transpose(1, 2)   # (B, H*W, C)
+        return [flat] * len(n)
+
+
 class DINOv2Backbone(nn.Module):
     """
     DINOv2 ViT as backbone with FPN adapter for multi-scale features.
@@ -68,14 +97,22 @@ class DINOv2Backbone(nn.Module):
         super().__init__()
         self.out_channels = out_channels
 
-        # Load DINOv2 (will download if not cached)
-        try:
-            self.backbone = torch.hub.load('facebookresearch/dinov2', model_name,
-                                           pretrained=True)
-        except Exception:
-            # Fallback: create ViT-S manually
-            from torchvision.models import vit_b_16
-            self.backbone = vit_b_16(pretrained=False)
+        offline = os.environ.get("SAFE_DET_OFFLINE_BACKBONE", "0") == "1"
+        if offline:
+            self.backbone = _FallbackTinyBackbone(embed_dim=384)
+        else:
+            try:
+                self.backbone = torch.hub.load(
+                    'facebookresearch/dinov2', model_name, pretrained=True
+                )
+            except Exception as exc:
+                # Hard-fail with a useful message rather than silently
+                # substituting the wrong architecture.
+                raise RuntimeError(
+                    f"Could not load DINOv2 from torch.hub ({exc!s}). "
+                    "Set SAFE_DET_OFFLINE_BACKBONE=1 to use a CPU-only "
+                    "stub for testing, or pre-download the checkpoint."
+                ) from exc
 
         if freeze_backbone:
             for param in self.backbone.parameters():
@@ -164,7 +201,8 @@ class FireSightDetector(nn.Module):
     def __init__(self, num_classes=2, backbone_type='dinov2',
                  backbone_channels=256, use_dcm=True, use_fam=True,
                  use_tm=True, use_temporal=False, head_type='yolox',
-                 freeze_backbone=False, input_size=(1024, 1024)):
+                 freeze_backbone=False, input_size=(1024, 1024),
+                 dfine_source=None, dfine_kwargs=None):
         super().__init__()
         self.input_size = input_size
         self.use_temporal = use_temporal
@@ -217,20 +255,43 @@ class FireSightDetector(nn.Module):
                 feat_channels=fpn_out,
                 stacked_convs=2
             )
+        elif head_type == 'dfine':
+            # Lazy import so the rest of SAFE-Det stays usable when the
+            # rtv4 source is not available. See dfine_head.py for the
+            # location-search and the training-loop integration TODO.
+            from .dfine_head import DFINEHeadAdapter
+            self.head = DFINEHeadAdapter(
+                num_classes=num_classes,
+                in_channels=(fpn_out, fpn_out, fpn_out),
+                source=dfine_source,
+                dfine_kwargs=dfine_kwargs,
+            )
         else:
-            raise NotImplementedError("DETR head not yet implemented")
+            raise ValueError(
+                f"Unknown head_type='{head_type}'. "
+                "Expected one of: 'yolox', 'dfine'."
+            )
 
         self.head_type = head_type
 
-    def forward(self, x, prev_x=None):
+    def forward(self, x, prev_x=None, targets=None):
         """
         Args:
-            x: (B, 3, H, W) current frame
-            prev_x: (B, 3, H, W) previous frame (optional, for temporal)
+            x:        (B, 3, H, W) current frame
+            prev_x:   (B, 3, H, W) previous frame (optional, for temporal)
+            targets:  list[dict] in DETR format — only used when
+                      ``head_type=='dfine'`` and the model is in training
+                      mode (the criterion's contrastive denoising group
+                      consumes them). YOLOX path ignores this argument.
 
         Returns:
-            Training: cls_scores, bbox_preds, obj_scores
-            Eval: decoded predictions
+            YOLOX head, training:  (cls_scores, bbox_preds, obj_scores)
+            YOLOX head, eval:      decoded predictions tensor
+            D-FINE head:           dict with 'pred_logits', 'pred_boxes',
+                                   plus auxiliary FDR / denoising keys.
+                                   The same dict shape is returned in
+                                   train and eval; postprocessing is
+                                   performed externally by PostProcessor.
         """
         # Backbone
         features = self.backbone(x)
@@ -248,10 +309,12 @@ class FireSightDetector(nn.Module):
         # Neck
         fpn_out = self.neck(tuple(enhanced))
 
-        # Head
+        # Head dispatch.
+        if self.head_type == 'dfine':
+            return self.head(fpn_out, targets=targets)
+
         cls_scores, bbox_preds, obj_scores = self.head(fpn_out)
-
         if not self.training:
-            return self.head.decode_outputs(cls_scores, bbox_preds, obj_scores, self.input_size)
-
+            return self.head.decode_outputs(cls_scores, bbox_preds, obj_scores,
+                                            self.input_size)
         return cls_scores, bbox_preds, obj_scores
