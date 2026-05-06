@@ -46,22 +46,30 @@ extended to 5 epochs to absorb the higher initial learning rate.
 
 | # | Config                                | per-GPU batch | Global batch (2 GPUs) | Img size | LR (config) | VRAM/GPU* | Epochs |
 |---|---------------------------------------|--------------:|----------------------:|---------:|------------:|----------:|-------:|
-| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~70 GB | 50 |
-| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~80 GB | 50 |
-| 3 | `ccpe_base_1024.yaml`                 | 32 | 64 | 1024 | 8e-4 (SGD)   | ~85 GB | 50 |
+| 1 | `ccpe_single_1024.yaml`               | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~30 GB | 50 |
+| 2 | `ccpe_multi_1024.yaml`                | 32 | 64 | 1024 | 8e-4 (SGD)†† | ~40 GB | 50 |
+| 3 | `ccpe_base_1024.yaml`                 | 32 | 64 | 1024 | 8e-4 (SGD)   | ~50 GB | 50 |
 | 4 | `firesight_s_1024.yaml`               | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 5 | `firesight_st_1024.yaml`              | 32 | 64 | 1022 | 1.28e-3 (SGD)| OOM† | 50 |
 | 6 | `firesight_s_nwd_tal_1024.yaml`       | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 7 | `firesight_dfine_1024.yaml`           | 32 | 64 | 1022 | 1.6e-3 (AdamW)| OOM† | 50 |
 
-> *Estimates at bf16 autocast with `use_checkpoint: false` on CCPE
-> configs and DINOv2 unfrozen. Numbers can drift ±15% with different
-> mosaic crops. CCPE-Single sits at ~65 GB steady-state but peaks
-> >90 GB on busy mosaic batches; `scripts/train_ddp.sh` exports
-> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to prevent
-> fragmentation OOMs at those peaks. **If you still OOM**, set
+> *Estimates at bf16 autocast with `use_checkpoint: true` on CCPE
+> configs (re-enabled — see below) and DINOv2 unfrozen. Numbers can
+> drift ±15% with different mosaic crops. `scripts/train_ddp.sh`
+> exports `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to
+> further reduce fragmentation. **If you still OOM**, set
 > `batch_size: 16` (or 8) — the linear-scaling LR for batch 16 is
 > half: 4e-4 (CCPE) / 8e-4 (FireSight).
+>
+> **Note on `use_checkpoint`:** initially set to `false` on CCPE
+> configs to save ~30% compute, but bs=32 / 1024² activations peak
+> > 90 GB on busy mosaic batches and the run OOMed after a few
+> epochs even with `expandable_segments:True`. Gradient checkpointing
+> recomputes Swin activations during backward — the peak drops ~3×
+> (to ~30 GB on `ccpe_single`), trading ~30% wall-clock speed for the
+> headroom needed to actually finish training. If you have a 140 GB+
+> H200 you can flip it back to `false`.
 >
 > †FireSight at batch 32 may not fit on H100 NVL (95 GB) because
 > DINOv2 activations are not checkpointed. Recommended fallback for

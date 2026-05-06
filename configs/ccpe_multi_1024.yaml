@@ -11,7 +11,7 @@ model:
   fpn_channels: 128
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: false  # disabled: GPU memory headroom available; saves ~30% compute
+  use_checkpoint: true  # re-enabled: see ccpe_single_1024.yaml (bs=32 OOM without it)
   # Pretrained Swin DISABLED — same bf16 issue as ccpe_single_1024.yaml.
   pretrained_swin: null  # checkpoints/swin_tiny_patch4_window7_224.pth
 

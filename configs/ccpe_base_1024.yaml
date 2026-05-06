@@ -11,7 +11,7 @@ model:
   fpn_channels: 192  # wider FPN for larger backbone
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: false  # disabled: GPU memory headroom available; saves ~30% compute
+  use_checkpoint: true  # re-enabled: see ccpe_single_1024.yaml (Swin-Base needs even more memory)
   # Swin-Base needs different weights. Download and set:
   #   curl -L -o checkpoints/swin_base_patch4_window7_224.pth \
   #     https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window7_224.pth
