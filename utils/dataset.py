@@ -18,7 +18,32 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Bump when the on-disk cache schema changes so old caches are invalidated.
-_INDEX_CACHE_VERSION = 1
+# v2: also excludes images failing the JPEG EOI marker check.
+_INDEX_CACHE_VERSION = 2
+
+# Silence libjpeg "Premature end of JPEG file" / "Corrupt JPEG data" warnings
+# from cv2 — we already detect+skip truncated images at scan time, so anything
+# that slips through has already been logged once. cv2 LOG_LEVEL_ERROR == 2.
+try:
+    cv2.setLogLevel(2)
+except Exception:
+    pass
+
+
+def _is_complete_jpeg(path: str) -> bool:
+    """Return False for JPEGs that are missing the FFD9 end-of-image marker
+    (truncated downloads, partial transfers, etc.). Non-JPEG files always
+    pass — we let PIL's header read be the second line of defence for them.
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(2)
+            if head != b'\xff\xd8':
+                return True  # not a JPEG; let PIL handle it
+            f.seek(-2, os.SEEK_END)
+            return f.read(2) == b'\xff\xd9'
+    except OSError:
+        return False
 
 
 class FireSmokeDataset(Dataset):
@@ -116,6 +141,13 @@ class FireSmokeDataset(Dataset):
         def _read_dim(args):
             i, fname = args
             path = os.path.join(img_dir, fname)
+            # Cheap structural check first: a truncated JPEG (missing the
+            # FFD9 EOI marker) will still partially decode in cv2 but emit
+            # a "Premature end of JPEG file" warning every epoch. Detect
+            # and exclude here so the corruption is reported exactly once
+            # instead of polluting training logs forever.
+            if not _is_complete_jpeg(path):
+                return i, fname, path, 0, 0, 'truncated_jpeg_no_eoi_marker'
             try:
                 with Image.open(path) as im:
                     w, h = im.size
