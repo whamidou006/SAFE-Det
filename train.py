@@ -12,6 +12,7 @@ Usage:
 
 import os
 import sys
+import math
 import yaml
 import argparse
 import time
@@ -25,6 +26,13 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.cuda.amp import GradScaler, autocast
+
+# bf16 has the same exponent range as fp32, so loss-scaling (which exists
+# to combat fp16 gradient underflow) is unnecessary. We default training
+# to bf16 autocast on Ampere+ (sm_80 / H100), so GradScaler should be a
+# no-op. Toggle this central constant if you ever switch back to fp16.
+AMP_DTYPE = torch.bfloat16
+USE_GRAD_SCALER = (AMP_DTYPE == torch.float16)
 
 from models import CCPE_Detector, FireSightDetector
 from utils.dataset import FireSmokeDataset, collate_fn
@@ -284,7 +292,7 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
 
         optimizer.zero_grad()
 
-        with autocast(dtype=torch.bfloat16):
+        with autocast(dtype=AMP_DTYPE):
             if head_type == 'dfine':
                 # Pass targets into the model so the contrastive
                 # denoising group can be built inside DFINETransformer.
@@ -303,11 +311,19 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
                     base.head,
                 )
 
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
-        scaler.step(optimizer)
-        scaler.update()
+        if USE_GRAD_SCALER:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # bf16 path: skip GradScaler entirely (it adds an extra
+            # device sync at unscale_ and provides no benefit because
+            # bf16 cannot underflow the way fp16 can).
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -343,7 +359,7 @@ def validate(model, dataloader, loss_fn, rank, cfg):
 
     for imgs, targets, _ in dataloader:
         imgs = imgs.cuda(non_blocking=True)
-        with autocast(dtype=torch.bfloat16):
+        with autocast(dtype=AMP_DTYPE):
             if head_type == 'dfine':
                 from models.firesight.dfine_runtime import (
                     convert_yolox_targets_to_dfine,
@@ -361,6 +377,16 @@ def validate(model, dataloader, loss_fn, rank, cfg):
         num_batches += 1
 
     avg_loss = total_loss / max(num_batches, 1)
+
+    # Reduce across DDP ranks so best.pth selection sees the global mean
+    # instead of just rank-0's slice. Without this, the "best" checkpoint
+    # tracks rank-0 noise and on highly-skewed data the saved best may
+    # not actually be the global best.
+    if dist.is_available() and dist.is_initialized():
+        t = torch.tensor([avg_loss], device='cuda')
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        avg_loss = (t / dist.get_world_size()).item()
+
     if rank == 0:
         logger.info(f"Validation loss: {avg_loss:.4f}")
     return avg_loss
@@ -486,14 +512,27 @@ def main():
     # already-warmed-up LR, which compounds).
     base_lrs = [pg['lr'] for pg in optimizer.param_groups]
 
-    # Scheduler
+    # Scheduler — cosine annealing with **per-group** eta_min so the
+    # backbone group (initial lr*0.1) doesn't get overridden by the
+    # head group's floor. CosineAnnealingLR supports a single eta_min
+    # only, which would force backbone LR to floor at lr*0.05 (a 50%
+    # drop), drowning the intentional 10:1 backbone:head ratio.
     train_cfg = cfg.get('training', {})
     max_epochs = train_cfg.get('max_epochs', 80)
     warmup_epochs = train_cfg.get('warmup_epochs', 2)
+    T_max = max(1, max_epochs - warmup_epochs)
+    eta_min_ratio = float(train_cfg.get('eta_min_ratio', 0.05))
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max_epochs - warmup_epochs, eta_min=lr * 0.05
-    )
+    # Use LambdaLR with one lambda per group so each group anneals to
+    # its own (base_lr * eta_min_ratio) instead of a shared floor.
+    def _make_cosine(_group_idx):
+        def _lr(step):
+            cos_factor = 0.5 * (1.0 + math.cos(math.pi * min(step, T_max) / T_max))
+            return eta_min_ratio + (1.0 - eta_min_ratio) * cos_factor
+        return _lr
+
+    lr_lambdas = [_make_cosine(i) for i in range(len(optimizer.param_groups))]
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambdas)
 
     # Loss
     loss_cfg = cfg.get('loss', {})
@@ -524,8 +563,10 @@ def main():
             assigner_kwargs=loss_cfg.get('assigner_kwargs', None),
         )
 
-    # AMP scaler
-    scaler = GradScaler()
+    # AMP scaler — only meaningful for fp16; under bf16 (our default)
+    # the scaler stays effectively disabled but is constructed so the
+    # train_one_epoch USE_GRAD_SCALER branch still has a valid object.
+    scaler = GradScaler(enabled=USE_GRAD_SCALER)
 
     # Resume
     start_epoch = 0

@@ -342,13 +342,30 @@ class SwinTransformerCCPE(nn.Module):
         self.load_state_dict(model_dict, strict=False)
 
     def _map_key(self, key):
-        """Map official Swin Transformer keys to our naming."""
-        # Skip patch_embed (we use CCPE instead)
-        if key.startswith('patch_embed'):
+        """Map official Swin Transformer keys to our naming.
+
+        Local SwinCCPE differs from the official Swin checkpoint in two
+        ways: (1) we use CCPE in place of the standard patch_embed, so
+        those source weights are skipped, and (2) the per-block MLP is
+        an ``nn.Sequential`` with positional indices (``mlp.0``, ``mlp.3``)
+        rather than the named ``mlp.fc1`` / ``mlp.fc2`` modules used by
+        the official Swin / timm implementations. We also skip top-level
+        ``norm.*`` and the ImageNet classifier ``head.*`` (none exist in
+        our backbone), and ``attn_mask`` buffers (rebuilt at runtime).
+        """
+        # Skip CCPE-incompatible or absent modules
+        if key.startswith('patch_embed') or key.startswith('head'):
             return None
-        # Map layers.X -> stages.X
+        if key in ('norm.weight', 'norm.bias'):
+            return None
+        if key.endswith('.attn_mask'):
+            return None
+        # layers.X -> stages.X
         key = key.replace('layers.', 'stages.')
-        key = key.replace('blocks.', 'blocks.')
+        # mlp.fc1.* -> mlp.0.* (first nn.Linear in nn.Sequential)
+        # mlp.fc2.* -> mlp.3.* (Linear after GELU + Dropout)
+        key = key.replace('.mlp.fc1.', '.mlp.0.')
+        key = key.replace('.mlp.fc2.', '.mlp.3.')
         return key
 
     def forward(self, x):

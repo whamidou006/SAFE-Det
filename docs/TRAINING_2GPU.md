@@ -13,6 +13,30 @@ Replace `0,1` below with whichever two GPU IDs you want to use
 
 ---
 
+## 0. One-time: Swin-T ImageNet pretrained weights
+
+The two CCPE Swin-Tiny configs (`ccpe_single_1024.yaml` and
+`ccpe_multi_1024.yaml`) load ImageNet-pretrained transformer weights
+from `checkpoints/swin_tiny_patch4_window7_224.pth` (~115 MB). If the
+file is missing, download it once:
+
+```bash
+mkdir -p checkpoints
+curl -L -o checkpoints/swin_tiny_patch4_window7_224.pth \
+  https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth
+```
+
+`load_pretrained()` fills 177/233 backbone keys (every Swin transformer
+block, attention table and stage norm). The remaining 56 keys are the
+CCPE patch_embed + contrast modules, which intentionally train from
+scratch since the official Swin checkpoint has no equivalent.
+
+For `ccpe_base_1024.yaml` (Swin-Base), download the matching
+`swin_base_patch4_window7_224.pth` from the same release and uncomment
+the `pretrained_swin` line in the config.
+
+---
+
 ## 1. Per-config recipe (sized for 2× H100 NVL 95 GB)
 
 `batch_size` in the table is **per-GPU** (what the YAML carries).
@@ -30,7 +54,7 @@ extended to 5 epochs to absorb the higher initial learning rate.
 | 6 | `firesight_s_nwd_tal_1024.yaml`       | 32 | 64 | 1022 | 1.6e-3 (SGD) | ~90 GB† | 50 |
 | 7 | `firesight_dfine_1024.yaml`           | 32 | 64 | 1022 | 1.6e-3 (AdamW)| OOM† | 50 |
 
-> *Estimates at bf16 autocast with `use_checkpoint: true` on CCPE
+> *Estimates at bf16 autocast with `use_checkpoint: false` on CCPE
 > configs and DINOv2 unfrozen. Numbers can drift ±15% with different
 > mosaic crops. **If you OOM**, set `batch_size: 16` (or 8) — the
 > linear-scaling LR for batch 16 is half: 4e-4 (CCPE) / 8e-4 (FireSight).
@@ -43,8 +67,18 @@ extended to 5 epochs to absorb the higher initial learning rate.
 > All configs train for **50 epochs**, validate **every epoch**
 > (`val_interval: 1`) and snapshot **every 2 epochs**
 > (`save_interval: 2`). The best-loss model is saved as
-> `runs/<config>/best.pth` and overwritten whenever val loss improves.
-> `num_workers` is set to 16 to keep the bigger batches fed.
+> `runs/<config>/best.pth` and overwritten whenever val loss improves
+> (val loss is averaged across DDP ranks for fair selection).
+>
+> The cosine LR scheduler uses **per-group `eta_min`** so the backbone
+> floors at `backbone_lr * 0.05` and the head at `head_lr * 0.05`,
+> preserving the 10:1 ratio throughout annealing. Override with
+> `training.eta_min_ratio` in YAML.
+>
+> `num_workers` is set to 8 (was 16; lowered to fit `/dev/shm = 16 GB`).
+> Under bf16 autocast `GradScaler` is automatically disabled (it adds an
+> extra device sync and provides no benefit because bf16 cannot
+> underflow the way fp16 can).
 
 ---
 
