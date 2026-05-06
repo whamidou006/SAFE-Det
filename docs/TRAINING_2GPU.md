@@ -76,9 +76,12 @@ extended to 5 epochs to absorb the higher initial learning rate.
 > `training.eta_min_ratio` in YAML.
 >
 > `num_workers` is set to 8 (was 16; lowered to fit `/dev/shm = 16 GB`).
-> Under bf16 autocast `GradScaler` is automatically disabled (it adds an
-> extra device sync and provides no benefit because bf16 cannot
-> underflow the way fp16 can).
+> Under bf16 autocast `GradScaler` is **kept enabled** because its
+> `step()` call detects inf/NaN gradients and silently skips the
+> optimizer step — without that safety net a single bad batch
+> permanently NaNs the model. The actual loss-scaling part is a no-op
+> for bf16 (scale stays ~1.0). A defensive non-finite-loss check also
+> short-circuits the step before backward in the same code path.
 
 ---
 

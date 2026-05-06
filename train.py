@@ -27,12 +27,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.cuda.amp import GradScaler, autocast
 
-# bf16 has the same exponent range as fp32, so loss-scaling (which exists
-# to combat fp16 gradient underflow) is unnecessary. We default training
-# to bf16 autocast on Ampere+ (sm_80 / H100), so GradScaler should be a
-# no-op. Toggle this central constant if you ever switch back to fp16.
+# Default to bf16 autocast on H100 / A100. bf16 has the same exponent
+# range as fp32 so it can't underflow the way fp16 does — but we still
+# keep GradScaler enabled because its `step()` call has an essential
+# secondary role: detecting inf/NaN gradients and skipping the
+# optimizer step instead of stamping NaN into every parameter.
+# (Without this safety net, a single bad batch poisons the model and
+# the loss explodes to NaN within ~50 iterations.)
 AMP_DTYPE = torch.bfloat16
-USE_GRAD_SCALER = (AMP_DTYPE == torch.float16)
 
 from models import CCPE_Detector, FireSightDetector
 from utils.dataset import FireSmokeDataset, collate_fn
@@ -311,19 +313,29 @@ def train_one_epoch(model, dataloader, optimizer, scaler, loss_fn, epoch, rank, 
                     base.head,
                 )
 
-        if USE_GRAD_SCALER:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            # bf16 path: skip GradScaler entirely (it adds an extra
-            # device sync at unscale_ and provides no benefit because
-            # bf16 cannot underflow the way fp16 can).
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
-            optimizer.step()
+        # Defensive: skip the step entirely if the forward produced
+        # NaN/Inf loss before backward even runs. (GradScaler.step also
+        # checks gradients, but checking the loss too is cheap and
+        # protects against e.g. a degenerate batch slipping past.)
+        if not torch.isfinite(loss):
+            if rank == 0:
+                logger.warning(
+                    f"Epoch {epoch} batch {batch_idx}: non-finite loss "
+                    f"({loss.item()}); skipping step"
+                )
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+        # scaler.step() internally checks for inf/NaN gradients and
+        # skips the optimizer.step() call (returning None) when found.
+        # This is the key safety net under bf16: even though bf16
+        # itself doesn't underflow, the assigner's matmul or a
+        # numerically-bad target can still produce inf gradients.
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         num_batches += 1
@@ -563,10 +575,14 @@ def main():
             assigner_kwargs=loss_cfg.get('assigner_kwargs', None),
         )
 
-    # AMP scaler — only meaningful for fp16; under bf16 (our default)
-    # the scaler stays effectively disabled but is constructed so the
-    # train_one_epoch USE_GRAD_SCALER branch still has a valid object.
-    scaler = GradScaler(enabled=USE_GRAD_SCALER)
+    # AMP scaler — kept enabled even under bf16 because scaler.step()
+    # silently SKIPS the optimizer step when gradients contain inf/NaN,
+    # which is the only way to recover from a bad batch without
+    # poisoning the model with NaN parameters. The actual loss-scaling
+    # part is a no-op for bf16 (scale stays effectively 1.0 since bf16
+    # can't underflow), so the only cost is one extra device sync at
+    # unscale_ — well worth it for the inf/NaN safety net.
+    scaler = GradScaler()
 
     # Resume
     start_epoch = 0
