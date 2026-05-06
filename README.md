@@ -56,9 +56,33 @@ bash scripts/train_ddp.sh configs/firesight_s_1024.yaml 0,1,2,3
 ### Evaluation
 
 ```bash
+# Standard evaluation
 python eval.py --config configs/ccpe_single_1024.yaml --checkpoint runs/ccpe_single_1024/best.pth --gpu 0
-python eval.py --config configs/firesight_s_1024.yaml --checkpoint runs/firesight_s_1024/best.pth --split test
+
+# SAHI sliced inference (better for small smoke in large images)
+python eval.py --config configs/ccpe_single_1024.yaml --checkpoint runs/best.pth \
+    --sahi --slice-size 640 --overlap 0.2
+
+# SAHI on test split with custom thresholds
+python eval.py --config configs/firesight_s_1024.yaml --checkpoint runs/firesight_s_1024/best.pth \
+    --split test --sahi --slice-size 512 --overlap 0.3 --conf-thresh 0.3
 ```
+
+### SAHI (Slicing Aided Hyper Inference) — Optional
+
+SAHI tiles large images into overlapping slices, runs detection on each slice,
+then merges results. This dramatically improves detection of small/early smoke
+that would be lost when resizing 1920×1080 → 1024×1024.
+
+```bash
+pip install sahi  # Install once
+```
+
+| Mode | Best for | Speed |
+|------|----------|-------|
+| Standard (`--no sahi`) | General evaluation, fast | ~50 img/s |
+| SAHI `--slice-size 640` | Small smoke, high-res cameras | ~5 img/s |
+| SAHI `--slice-size 512 --overlap 0.3` | Maximum recall, tiny objects | ~3 img/s |
 
 ## Key Innovations
 

@@ -25,6 +25,13 @@ def parse_args():
     parser.add_argument('--conf-thresh', type=float, default=0.25)
     parser.add_argument('--iou-thresh', type=float, default=0.5)
     parser.add_argument('--split', choices=['val', 'test'], default='val')
+    # SAHI options
+    parser.add_argument('--sahi', action='store_true',
+                        help='Enable SAHI sliced inference (better for small objects)')
+    parser.add_argument('--slice-size', type=int, default=640,
+                        help='SAHI slice size in pixels (default: 640)')
+    parser.add_argument('--overlap', type=float, default=0.2,
+                        help='SAHI overlap ratio between slices (default: 0.2)')
     return parser.parse_args()
 
 
@@ -226,28 +233,49 @@ def main():
             num_classes=model_cfg['num_classes']
         )
 
-    dataloader = DataLoader(
-        dataset, batch_size=8, shuffle=False,
-        num_workers=4, collate_fn=collate_fn, pin_memory=True
-    )
+    # Choose evaluation mode
+    if args.sahi:
+        # SAHI sliced inference — better for small objects in large images
+        from utils.sahi_inference import run_sahi_evaluation
 
-    print(f"Evaluating on {len(dataset)} images ({args.split} split)")
-    print(f"Confidence threshold: {args.conf_thresh}")
+        if args.split == 'val':
+            img_dir = data_cfg['val_img_dir']
+            label_dir = data_cfg.get('val_label_dir')
+        else:
+            img_dir = data_cfg.get('test_img_dir', data_cfg['val_img_dir'].replace('test_random', 'test_disjoint'))
+            label_dir = data_cfg.get('test_label_dir', data_cfg.get('val_label_dir', '').replace('test_random', 'test_disjoint'))
 
-    results = evaluate(model, dataloader, model_cfg['num_classes'],
-                       args.conf_thresh, args.iou_thresh, device)
+        print(f"SAHI mode: slice_size={args.slice_size}, overlap={args.overlap}")
+        results = run_sahi_evaluation(
+            model=model, img_dir=img_dir, label_dir=label_dir,
+            device=device, num_classes=model_cfg['num_classes'],
+            conf_thresh=args.conf_thresh, iou_thresh=args.iou_thresh,
+            slice_size=args.slice_size, overlap_ratio=args.overlap
+        )
+    else:
+        # Standard evaluation (resize to model input size)
+        dataloader = DataLoader(
+            dataset, batch_size=8, shuffle=False,
+            num_workers=4, collate_fn=collate_fn, pin_memory=True
+        )
 
-    print("\n" + "=" * 50)
-    print(f"{'Class':<10} {'AP50':<8} {'P':<8} {'R':<8} {'GT':<6} {'Det':<6}")
-    print("-" * 50)
-    for cls_name in ['smoke', 'fire']:
-        if cls_name in results:
-            r = results[cls_name]
-            print(f"{cls_name:<10} {r['AP50']:.4f}  {r.get('precision', 0):.4f}  "
-                  f"{r.get('recall', 0):.4f}  {r.get('num_gt', 0):<6} {r.get('num_det', 0):<6}")
-    print("-" * 50)
-    print(f"{'mAP50':<10} {results['mAP50']:.4f}")
-    print("=" * 50)
+        print(f"Evaluating on {len(dataset)} images ({args.split} split)")
+        print(f"Confidence threshold: {args.conf_thresh}")
+
+        results = evaluate(model, dataloader, model_cfg['num_classes'],
+                           args.conf_thresh, args.iou_thresh, device)
+
+        print("\n" + "=" * 50)
+        print(f"{'Class':<10} {'AP50':<8} {'P':<8} {'R':<8} {'GT':<6} {'Det':<6}")
+        print("-" * 50)
+        for cls_name in ['smoke', 'fire']:
+            if cls_name in results:
+                r = results[cls_name]
+                print(f"{cls_name:<10} {r['AP50']:.4f}  {r.get('precision', 0):.4f}  "
+                      f"{r.get('recall', 0):.4f}  {r.get('num_gt', 0):<6} {r.get('num_det', 0):<6}")
+        print("-" * 50)
+        print(f"{'mAP50':<10} {results['mAP50']:.4f}")
+        print("=" * 50)
 
 
 if __name__ == '__main__':
