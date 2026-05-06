@@ -11,7 +11,7 @@ model:
   fpn_channels: 192  # wider FPN for larger backbone
   input_size: [1024, 1024]
   contrast_steps: [1, 2, 4, 8, 16, 32, 64, 128]
-  use_checkpoint: true
+  use_checkpoint: false  # disabled: GPU memory headroom available; saves ~30% compute
   pretrained_swin: null  # set to swin_base_patch4_window7_224.pth
 
 data:
